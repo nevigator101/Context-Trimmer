@@ -12,6 +12,8 @@ export interface Entries {
   plugins: Record<string, boolean>;
   skills: Record<string, string>;
   mcpjson: string[];
+  /** permissions.allow rules, e.g. "Skill(ctx:enable)" so the model can re-enable items without a prompt. */
+  allow: string[];
 }
 
 export interface Applied {
@@ -30,7 +32,7 @@ export interface Applied {
   verified?: { at: string; beforeTokens: number; afterTokens: number; rawAfterTokens: number };
 }
 
-export const emptyEntries = (): Entries => ({ deny: [], plugins: {}, skills: {}, mcpjson: [] });
+export const emptyEntries = (): Entries => ({ deny: [], plugins: {}, skills: {}, mcpjson: [], allow: [] });
 
 export function emptyApplied(file: string): Applied {
   return { version: 1, file, owned: emptyEntries(), preexisting: emptyEntries(), history: [] };
@@ -42,7 +44,11 @@ export function appliedPath(root: string): string { return path.join(projectStat
 export function backupDir(root: string): string { return path.join(projectStateDir(root), 'backups'); }
 
 export function loadApplied(root: string): Applied {
-  return readJson<Applied>(appliedPath(root)) ?? emptyApplied(localSettingsPath(root));
+  const a = readJson<Applied>(appliedPath(root)) ?? emptyApplied(localSettingsPath(root));
+  // Records written by older versions lack newer entry kinds.
+  a.owned = { ...emptyEntries(), ...a.owned };
+  a.preexisting = { ...emptyEntries(), ...a.preexisting };
+  return a;
 }
 
 /** File-system operations, injectable so tests can simulate failures. */
@@ -236,12 +242,13 @@ export function undo(root: string, all = false, ops: FsOps = realOps): UndoResul
 
 const isObj = (v: unknown): v is Json => !!v && typeof v === 'object' && !Array.isArray(v);
 
-function denyList(s: Json, create: boolean): unknown[] | undefined {
+function permList(s: Json, key: 'deny' | 'allow', create: boolean): unknown[] | undefined {
   if (!isObj(s.permissions)) { if (!create) return undefined; s.permissions = {}; }
   const p = s.permissions as Json;
-  if (!Array.isArray(p.deny)) { if (!create) return undefined; p.deny = []; }
-  return p.deny as unknown[];
+  if (!Array.isArray(p[key])) { if (!create) return undefined; p[key] = []; }
+  return p[key] as unknown[];
 }
+const denyList = (s: Json, create: boolean) => permList(s, 'deny', create);
 function objKey(s: Json, key: string, create: boolean): Json | undefined {
   if (!isObj(s[key])) { if (!create) return undefined; s[key] = {}; }
   return s[key] as Json;
@@ -249,6 +256,7 @@ function objKey(s: Json, key: string, create: boolean): Json | undefined {
 function cleanupEmpty(s: Json): void {
   if (isObj(s.permissions)) {
     if (Array.isArray(s.permissions.deny) && !s.permissions.deny.length) delete s.permissions.deny;
+    if (Array.isArray(s.permissions.allow) && !s.permissions.allow.length) delete s.permissions.allow;
     if (!Object.keys(s.permissions).length) delete s.permissions;
   }
   for (const k of ['enabledPlugins', 'skillOverrides']) if (isObj(s[k]) && !Object.keys(s[k] as Json).length) delete s[k];
@@ -259,9 +267,11 @@ export type EntryRef =
   | { kind: 'tool'; name: string }
   | { kind: 'plugin'; id: string }
   | { kind: 'skill'; name: string; level: 'name-only' | 'user-invocable-only' | 'off' }
-  | { kind: 'mcpjson'; name: string };
+  | { kind: 'mcpjson'; name: string }
+  | { kind: 'allow'; rule: string };
 
 export function describeRef(r: EntryRef): string {
+  if (r.kind === 'allow') return `allow ${r.rule}`;
   if (r.kind === 'tool') return `deny ${r.name}`;
   if (r.kind === 'plugin') return `plugin ${r.id} off`;
   if (r.kind === 'skill') return `skill ${r.name} ${r.level}`;
@@ -270,6 +280,16 @@ export function describeRef(r: EntryRef): string {
 
 /** Set one trim entry. Owned if ctx adds it; preexisting if already there; skipped if the user set a different value. */
 export function setEntry(s: Json, a: Applied, r: EntryRef): string | undefined {
+  if (r.kind === 'allow') {
+    const allow = permList(s, 'allow', true)!;
+    if (allow.includes(r.rule)) {
+      if (!a.owned.allow.includes(r.rule) && !a.preexisting.allow.includes(r.rule)) a.preexisting.allow.push(r.rule);
+      return undefined;
+    }
+    allow.push(r.rule);
+    a.owned.allow.push(r.rule);
+    return describeRef(r);
+  }
   if (r.kind === 'tool') {
     const deny = denyList(s, true)!;
     if (deny.includes(r.name)) {
@@ -319,7 +339,13 @@ export type ClearResult = 'removed' | 'not-owned' | 'absent';
 export function clearEntry(s: Json, a: Applied, r: EntryRef, force = false): ClearResult {
   const drop = <T>(arr: T[], v: T) => { const i = arr.indexOf(v); if (i >= 0) arr.splice(i, 1); };
   let result: ClearResult = 'absent';
-  if (r.kind === 'tool') {
+  if (r.kind === 'allow') {
+    const allow = permList(s, 'allow', false);
+    if (allow?.includes(r.rule)) {
+      if (a.owned.allow.includes(r.rule) || force) { drop(allow, r.rule); drop(a.owned.allow, r.rule); drop(a.preexisting.allow, r.rule); result = 'removed'; }
+      else result = 'not-owned';
+    }
+  } else if (r.kind === 'tool') {
     const deny = denyList(s, false);
     if (deny?.includes(r.name)) {
       if (a.owned.deny.includes(r.name) || force) { drop(deny, r.name); drop(a.owned.deny, r.name); drop(a.preexisting.deny, r.name); result = 'removed'; }
@@ -355,12 +381,17 @@ export function ownedRefs(a: Applied): EntryRef[] {
     ...Object.keys(a.owned.plugins).map((id) => ({ kind: 'plugin', id }) as EntryRef),
     ...Object.entries(a.owned.skills).map(([name, level]) => ({ kind: 'skill', name, level }) as EntryRef),
     ...a.owned.mcpjson.map((name) => ({ kind: 'mcpjson', name }) as EntryRef),
+    ...a.owned.allow.map((rule) => ({ kind: 'allow', rule }) as EntryRef),
   ];
 }
 
 export function refKey(r: EntryRef): string {
+  if (r.kind === 'allow') return `allow:${r.rule}`;
   return r.kind === 'plugin' ? `plugin:${r.id}` : r.kind === 'mcpjson' ? `mcpjson:${r.name}` : `${r.kind}:${r.name}`;
 }
+
+/** Allow rule that lets the model invoke /ctx:enable without a permission prompt. */
+export const ENABLE_RULE = 'Skill(ctx:enable)';
 
 /** Owned entries that are no longer in the file as ctx wrote them (manual edits). */
 export function driftedEntries(settings: Json, a: Applied): string[] {

@@ -38,8 +38,13 @@ function decide(body) {
   return { text: 'ok' };
 }
 
+/**
+ * Start the fake API. `api.script` is a queue of functions (body) => decision | undefined, consulted before the
+ * default rules for main-conversation requests: when the first one returns a decision, it is used and dequeued.
+ */
 export function startFakeApi() {
   const requests = [];
+  const script = [];
   let n = 0;
   const server = http.createServer((req, res) => {
     let raw = '';
@@ -54,7 +59,9 @@ export function startFakeApi() {
       let body;
       try { body = JSON.parse(raw); } catch { res.writeHead(400); res.end(); return; }
       requests.push(body);
-      const d = decide(body);
+      const scripted = script.length && (body.tools ?? []).length ? script[0](body) : undefined;
+      if (scripted) script.shift();
+      const d = scripted ?? decide(body);
       const id = `msg_fake_${++n}`;
       const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
       const content = d.tool
@@ -81,7 +88,7 @@ export function startFakeApi() {
     });
   });
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({
-    url: `http://127.0.0.1:${server.address().port}`, requests, close: () => server.close(),
+    url: `http://127.0.0.1:${server.address().port}`, requests, script, close: () => server.close(),
   })));
 }
 

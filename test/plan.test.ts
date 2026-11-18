@@ -82,10 +82,15 @@ describe('buildPlan', () => {
     expect(p['skill:code-review']).toMatchObject({ class: 'unused', action: 'off', group: 'skills-off' });
   });
 
-  it('re-enabled twice means used', () => {
-    const l = ledger({}, 10, { reenables: { 'tool:ListAgents': ['a', 'b'] } });
+  it('a re-enabled item is not trimmed again (inside the usage window)', () => {
+    const sessions = [{ id: 's0', file: '', mtime: '2026-11-10T00:00:00.000Z', calls: 1 }];
+    const l = ledger({}, 1, {
+      sessions,
+      reenables: { 'tool:ListAgents': ['2026-11-12T10:00:00.000Z publish a page'], 'tool:Artifact': ['2026-11-01T00:00:00.000Z old'] },
+    });
     const p = byId(buildPlan(measurement(ITEMS), l, undefined, { protectedIds: prot(l) }));
-    expect(p['tool:ListAgents']).toMatchObject({ class: 'used', action: 'none' });
+    expect(p['tool:ListAgents']).toMatchObject({ class: 'used', action: 'none', reason: 're-enabled once recently' });
+    expect(p['tool:Artifact']).toMatchObject({ action: 'off' });
   });
 
   it('foreign plugins and skills', () => {

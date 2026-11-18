@@ -388,7 +388,9 @@ Build the descriptions from the first sentence of each item's own description, t
   - **Tools:** callable from the next call, but invisible until `/clear` or a new session **[verified M0]**. `ctx on` therefore prints the tool's input schema (captured at measure time) so Claude can call it right away.
   - **Plugins:** applies after `/reload-plugins`. Tell the user to run it.
   - **Skills:** can be invoked by name immediately; the listing isn't refreshed **[verified M0]**.
-- **Record each re-enable** in the ledger. If an item is re-enabled twice within 10 sessions, `ctx plan` reclassifies it as "used" so it isn't trimmed again.
+- **Permission [verified M3]:** the model needs the allow rule `Skill(ctx:enable)` to invoke a plugin skill without a prompt. `/ctx:setup` asks the user and, if they agree, adds it as an owned entry (`apply --allow-enable` or `ctx allow-enable`). The skill's `allowed-tools: Bash(node:*)` then covers the CLI call.
+- **Hot-reload delay [verified M3]:** a settings change reaches the running session after about 1 s. `ctx on` waits 1.5 s after re-enabling a tool inside Claude Code.
+- **Record each re-enable** in the ledger. If an item was re-enabled within the usage window (one re-enable is enough; the original spec said twice), `ctx plan` reclassifies it as "used" so it isn't trimmed again.
 
 ### 9.3 Later milestone: learned triggers (`UserPromptSubmit`)
 

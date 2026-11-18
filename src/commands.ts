@@ -3,15 +3,15 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadMeasurement, measurementPath, verifyRun, type Measurement } from './measure.js';
-import { readJson, writeJson } from './paths.js';
+import { projectKey, readJson, writeJson } from './paths.js';
 import { loadPlan, type Group, type Plan } from './plan.js';
 import { protectedIds } from './protect.js';
 import { resolveItem, knownIds } from './resolve.js';
 import { findRule, loadScopes } from './settings.js';
 import { fmtK } from './tokens.js';
-import { ledgerPath, loadLedger } from './usage.js';
+import { ledgerPath, loadLedger, type Ledger } from './usage.js';
 import {
-  clearEntry, describeRef, loadApplied, ownedRefs, refKey, setEntry, undo as undoWrite, writeSettings, appliedPath,
+  clearEntry, describeRef, ENABLE_RULE, loadApplied, ownedRefs, refKey, setEntry, undo as undoWrite, writeSettings, appliedPath,
   type Applied, type EntryRef,
 } from './writer.js';
 import { loadProfile } from './profile.js';
@@ -56,7 +56,26 @@ export function addGitExclude(root: string): boolean {
   return true;
 }
 
-export interface ApplyOptions { groups?: Group[]; yes?: boolean; planFile?: string; verify?: boolean; gitExclude?: boolean; }
+export interface ApplyOptions {
+  groups?: Group[]; yes?: boolean; planFile?: string; verify?: boolean; gitExclude?: boolean;
+  /** Add the allow rule Skill(ctx:enable) so Claude can re-enable items without a permission prompt. */
+  allowEnable?: boolean;
+}
+
+/** `ctx allow-enable [--remove]`: let Claude invoke /ctx:enable without asking (an owned, undoable allow rule). */
+export function allowEnable(root: string, remove: boolean, out: Out): number {
+  const ref: EntryRef = { kind: 'allow', rule: ENABLE_RULE };
+  const res = writeSettings(root, remove ? 'disallow enable' : 'allow enable', (s, a) => {
+    if (remove) return clearEntry(s, a, ref) === 'removed' ? [`removed allow ${ENABLE_RULE}`] : [];
+    const c = setEntry(s, a, ref);
+    return c ? [c] : [];
+  });
+  if (!res.changes.length) out(remove ? `${ENABLE_RULE} isn't set by ctx; nothing removed.` : `${ENABLE_RULE} is already allowed.`);
+  else out(remove
+    ? `Removed ${ENABLE_RULE}: Claude will ask before switching items back on.`
+    : `Added ${ENABLE_RULE} to ${res.file}: Claude can switch trimmed items back on when a task needs them, without asking.`);
+  return 0;
+}
 
 export async function apply(root: string, opts: ApplyOptions, out: Out): Promise<number> {
   const plan = opts.planFile ? readJson<Plan>(path.resolve(opts.planFile)) : loadPlan(root);
@@ -72,12 +91,16 @@ export async function apply(root: string, opts: ApplyOptions, out: Out): Promise
     // Converge: drop owned entries the plan no longer wants (except ones the user switched off with `ctx off`).
     const pinned = new Set(a.pinnedOff ?? []);
     for (const r of ownedRefs(a)) {
-      if (desiredKeys.has(refKey(r)) || pinned.has(refKey(r))) continue;
+      if (r.kind === 'allow' || desiredKeys.has(refKey(r)) || pinned.has(refKey(r))) continue;
       if (clearEntry(s, a, r) === 'removed') changes.push(`removed ${describeRef(r)} (no longer planned)`);
     }
     for (const r of desired) {
       const c = setEntry(s, a, r);
       if (c) changes.push(c);
+    }
+    if (opts.allowEnable) {
+      const c = setEntry(s, a, { kind: 'allow', rule: ENABLE_RULE });
+      if (c) changes.push(`${c} (Claude may switch items back on when a task needs them)`);
     }
     return changes;
   };
@@ -150,8 +173,11 @@ function resolveOrExplain(root: string, query: string, out: Out): string | undef
 }
 
 function recordReenable(root: string, id: string, reason?: string): void {
-  const l = loadLedger(root);
-  if (!l) return;
+  // Start a ledger if there is none yet; `ctx usage` keeps reenables when it rebuilds.
+  const l: Ledger = loadLedger(root) ?? {
+    project: projectKey(root), builtAt: new Date().toISOString(), sessionsScanned: 0, window: { sessions: 10 },
+    sessions: [], items: {}, reenables: {}, global: { skillUsage: {}, pluginUsage: {} },
+  };
   (l.reenables[id] ??= []).push(new Date().toISOString() + (reason ? ` ${reason.slice(0, 120)}` : ''));
   l.reenables[id] = l.reenables[id].slice(-10);
   writeJson(ledgerPath(root), l);
@@ -210,6 +236,8 @@ export function on(root: string, query: string, opts: OnOptions, out: Out): numb
     out(`${id} is on again (${res.file}, backup ${res.backup}).`);
     for (const l of howItApplies(id, m)) out(l);
     recordReenable(root, id, opts.reason);
+    // Claude Code hot-reloads settings within about a second; wait so an immediate next call already works.
+    if (id.startsWith('tool:') && process.env.CLAUDECODE) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
     return 0;
   }
   if (result === 'not-owned') {

@@ -78,7 +78,9 @@ export function buildPlan(m: Measurement, ledger: Ledger | undefined, profile: P
   const items: PlanItem[] = [];
   const notes: string[] = [];
   const used = (id: string) => ledger?.items[id]?.sessionsUsed ?? 0;
-  const reenabled = (id: string) => (ledger?.reenables[id] ?? []).length;
+  // Re-enables inside the usage window (newer than its oldest session; all of them if there's no history).
+  const windowStart = ledger?.sessions.length ? ledger.sessions.reduce((a, s) => (s.mtime < a ? s.mtime : a), ledger.sessions[0].mtime) : '';
+  const reenabled = (id: string) => (ledger?.reenables[id] ?? []).filter((ts) => ts.slice(0, 24) >= windowStart).length;
 
   for (const [id, it] of Object.entries(m.items)) {
     if (it.kind === 'memory') continue;
@@ -103,7 +105,7 @@ export function buildPlan(m: Measurement, ledger: Ledger | undefined, profile: P
     if (it.unmeasured) { push('negligible', 'none', `not measured (${it.unmeasured})`); continue; }
     if (opts.protectedIds.has(id)) { push('protected', 'none', 'protected'); continue; }
     if (profile?.keep?.includes(id)) { push('kept', 'none', 'pinned in the project profile'); continue; }
-    if (reenabled(id) >= 2) { push('used', 'none', `re-enabled ${reenabled(id)} times recently`); continue; }
+    if (reenabled(id) >= 1) { push('used', 'none', `re-enabled ${reenabled(id) === 1 ? 'once' : `${reenabled(id)} times`} recently`); continue; }
     if (sessions > 0) {
       if (kind !== 'skill' && full >= rareMin && sessions <= 1 && window >= 2) {
         push('rare', 'off', `used in only ${sessions} of ${window} sessions (opt-in)`, 'rare');

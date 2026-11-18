@@ -89,6 +89,8 @@ export interface CapturedRequest {
   tools: { name: string; deferred: boolean; chars: number; description: string; inputSchema?: unknown }[];
   systemChars: number;
   messagesChars: number;
+  /** Skill name -> first sentence of its description, from the listing in the request. */
+  skillDescriptions: Record<string, string>;
 }
 
 /**
@@ -127,16 +129,46 @@ export async function captureRequest(bin: string, cwd: string, spec: RunSpec): P
       })),
       systemChars: JSON.stringify(j.system ?? '').length,
       messagesChars: JSON.stringify(j.messages ?? []).length,
+      skillDescriptions: parseSkillListing(collectText(j.messages)),
     };
   } catch {
     return null;
   }
 }
 
+function collectText(v: unknown, out: string[] = []): string {
+  if (typeof v === 'string') out.push(v);
+  else if (Array.isArray(v)) for (const x of v) collectText(x, out);
+  else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) if (k === 'text' || k === 'content') collectText(x, out);
+  return out.join('\n');
+}
+
+/**
+ * Skill descriptions from the skill listing Claude Code sends ("The following skills are available ...",
+ * then "- name: description" lines; name-only skills have no description).
+ */
+export function parseSkillListing(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const start = text.indexOf('following skills are available');
+  if (start < 0) return out;
+  for (const line of text.slice(start).split('\n').slice(1)) {
+    if (line.includes('</system-reminder>')) break;
+    // Continuation lines of multi-line descriptions don't start with "- ".
+    if (!line.startsWith('- ')) continue;
+    const body = line.slice(2);
+    const i = body.indexOf(': ');
+    const name = (i >= 0 ? body.slice(0, i) : body).trim();
+    if (!name || /\s/.test(name)) continue;
+    out[name.replace(/^anthropic-skills:/, '')] = i >= 0 ? firstSentence(body.slice(i + 2)) : '';
+  }
+  return out;
+}
+
 /** First sentence of a description, max 80 chars (capability index format, spec §9.1). */
 export function firstSentence(text: string, max = 80): string {
   const flat = text.replace(/\s+/g, ' ').trim();
-  const m = flat.match(/^(.+?[.!?])(\s|$)/);
+  // A sentence ends at . ! ? followed by a capitalised word or the end ("e.g. 5m" is not an end).
+  const m = flat.match(/^(.+?[.!?])(?=\s+["'(]?[A-Z]|$)/);
   const s = m ? m[1] : flat;
   return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s;
 }

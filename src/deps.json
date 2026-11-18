@@ -1,6 +1,6 @@
 {
-  "_comment": "Spec §7.2. 'skills': skills that need the item; they go to name-only with it, and if one is used or kept, the item is kept.",
+  "_comment": "Spec §7.2. 'skills': skills that need the item; they go to name-only with it, and if one is used or kept, the item is kept. 'note': shown in the capability index.",
   "tool:Artifact": { "skills": ["artifact-design", "artifact-diagramming", "artifact-capabilities"] },
-  "tool:ScheduleWakeup": { "skills": ["loop"] },
-  "tool:ReportFindings": { "skills": ["code-review"] }
+  "tool:ScheduleWakeup": { "skills": ["loop"], "note": "needed by /loop" },
+  "tool:ReportFindings": { "skills": ["code-review"], "note": "needed by /code-review" }
 }

@@ -5,10 +5,11 @@ import { resolveProjectRoot } from './paths.js';
 import { renderReport } from './report.js';
 import { fmtK } from './tokens.js';
 import { buildLedger, loadLedger } from './usage.js';
-import { apply, off, on, undo, verifyAndRecord } from './commands.js';
+import { allowEnable, apply, off, on, undo, verifyAndRecord } from './commands.js';
 import { buildPlan, loadPlan, renderPlan, reviewPlan, savePlan, type Group } from './plan.js';
 import { loadProfile, setProfile } from './profile.js';
 import { protectedIds } from './protect.js';
+import { readHookInput, sessionEnd, sessionStart } from './hook.js';
 
 const GROUPS: Group[] = ['tools', 'plugins', 'skills', 'skills-off', 'rare'];
 function parseGroups(v: string | true | undefined): Group[] | undefined {
@@ -31,14 +32,16 @@ Usage: ctx <command> [flags]
   plan [--aggressive] [--min-tokens N] [--json] [--set '<json>']
                                             propose a lean profile; --set applies Claude's review
                                             (it may only make the plan more conservative)
-  apply [--groups g1,g2] [--yes] [--plan <file>] [--no-verify] [--git-exclude]
+  apply [--groups g1,g2] [--yes] [--plan <file>] [--no-verify] [--git-exclude] [--allow-enable]
                                             write the plan to .claude/settings.local.json
                                             (groups: tools, plugins, skills, skills-off, rare;
                                             default: tools,plugins,skills; dry run without --yes)
+  allow-enable [--remove]                   let Claude run /ctx:enable without a permission prompt
   on <item> [--force] [--reason "<task>"]   switch one item back on
   off <item> [--level name-only|off] [--force]   switch one item off
   undo [all]                                restore the previous backup, or the original file
   verify                                    one /context run of the current settings
+  hook session-start | session-end          hook entry points (cached data only)
 Items: tool:Artifact, plugin:cloudflare@cloudflare, skill:docx, or just a name ("artifact").
 Global: --project <dir> (default: CLAUDE_PROJECT_DIR or cwd)`;
 
@@ -67,10 +70,27 @@ async function main(argv: string[]): Promise<number> {
     case 'usage': {
       const n = typeof a.flags.sessions === 'string' ? parseInt(a.flags.sessions, 10) : undefined;
       const l = await buildLedger(root, { sessions: n && n > 0 ? n : undefined });
+      if (a.flags.quiet) return 0;
       if (a.flags.json) { console.log(JSON.stringify(l, null, 2)); return 0; }
       console.log(`Scanned ${l.sessionsScanned} transcripts; ${l.sessions.length} sessions with assistant turns in the window.`);
       const top = Object.entries(l.items).sort((x, y) => y[1].sessionsUsed - x[1].sessionsUsed || y[1].calls - x[1].calls);
       for (const [id, u] of top.slice(0, 30)) console.log(`  ${id.padEnd(44)} ${String(u.sessionsUsed).padStart(3)} sessions ${String(u.calls).padStart(5)} calls  last ${u.lastUsedAt?.slice(0, 16) ?? '-'}`);
+      return 0;
+    }
+    case 'hook': {
+      // Never fail a session because of ctx: swallow errors, always exit 0.
+      try {
+        const input = readHookInput();
+        const hookRoot = resolveProjectRoot(typeof a.flags.project === 'string' ? a.flags.project : process.env.CLAUDE_PROJECT_DIR ?? input.cwd);
+        if (a.positional[0] === 'session-start') {
+          const out = sessionStart(hookRoot);
+          if (out.systemMessage || out.hookSpecificOutput) process.stdout.write(JSON.stringify(out));
+        } else if (a.positional[0] === 'session-end') {
+          sessionEnd(hookRoot, process.argv[1]);
+        }
+      } catch (e) {
+        if (process.env.CTX_DEBUG) console.error(e);
+      }
       return 0;
     }
     case 'report': {
@@ -123,7 +143,10 @@ async function main(argv: string[]): Promise<number> {
         planFile: typeof a.flags.plan === 'string' ? a.flags.plan : undefined,
         verify: !a.flags['no-verify'],
         gitExclude: !!a.flags['git-exclude'],
+        allowEnable: !!a.flags['allow-enable'],
       }, (s) => console.log(s));
+    case 'allow-enable':
+      return allowEnable(root, !!a.flags.remove, (s) => console.log(s));
     case 'on':
     case 'off': {
       const q = a.positional.join(' ').trim();

@@ -68,6 +68,14 @@ describe('writeSettings: merge and ownership', () => {
     expect(json()).toEqual({ skillOverrides: { pdf: 'user-invocable-only' }, enabledPlugins: { 'w@m': true } });
   });
 
+  it('allow rules are owned, kept next to user rules, and removable', () => {
+    write(JSON.stringify({ permissions: { allow: ['Read'] } }));
+    apply([{ kind: 'allow', rule: 'Skill(ctx:enable)' }]);
+    expect(json().permissions.allow).toEqual(['Read', 'Skill(ctx:enable)']);
+    writeSettings(root, 'x', (s, a) => (clearEntry(s, a, { kind: 'allow', rule: 'Skill(ctx:enable)' }) === 'removed' ? ['x'] : []));
+    expect(json()).toEqual({ permissions: { allow: ['Read'] } });
+  });
+
   it('removing an owned entry cleans up empty containers', () => {
     write('{"model":"opus"}');
     apply([{ kind: 'tool', name: 'Artifact' }]);

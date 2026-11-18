@@ -32,6 +32,15 @@ server that saves the request body and answers HTTP 400, so no model call is mad
 | 20 | `~/.claude.json` counters | `skillUsage[name] = {usageCount, lastUsedAt(epoch ms)}`; `pluginUsage[id] = {usageCount, lastUsedAt, lastUsedNumStartups}`; project entries keyed `c:/Users/Nev/Observibility Proxy` (forward slashes, lower-case drive). | As specified; read only. |
 | 21 | `/reload-plugins` mid-session | **Yes.** It prints "Reloaded: 2 plugins · 20 skills · …". The re-enabled plugin's skills appear in the next request's listing and can be invoked (subject to the normal Skill permission). | `/ctx:enable` for plugins: tell the user to run `/reload-plugins`. |
 
+## Milestone 3 findings (2026-11-18, `test/e2e/enable-loop.mjs`)
+
+| # | Question | Result | Design impact |
+|---|---|---|---|
+| 22 | Can the model invoke `/ctx:enable` without a prompt? | **No, not by default.** A model-invoked *plugin* skill needs permission: in `-p` mode it was refused with "The user can add the allow rule Skill(ctx:enable)". With that rule in `permissions.allow`, the skill launches, and its `allowed-tools: Bash(node:*)` covers the `node … on` call. | `ctx allow-enable` and `apply --allow-enable` add `Skill(ctx:enable)` as an owned, undoable entry. `/ctx:setup` asks the user first. |
+| 23 | How fast does a settings change reach a running session? | A tool call made right after the deny was removed still failed ("disabled for this session"); after 1 s it worked. ctx's atomic replace (temp file and rename) is picked up by the watcher. | When `ctx on` re-enables a tool inside Claude Code, it waits 1.5 s before returning. |
+| 24 | S4: the plugin's own context cost | Request capture with and without `--plugin-dir ./ctx`: **+172 chars (about 50 tokens)**, which is only the `ctx:enable` listing line. The seven user-only skills aren't listed. The capability index for this project adds about 100 tokens. | Meets S4 (under 300 with nothing off, under 600 with the index). |
+| 25 | S5: SessionStart hook latency | About 160 ms per run (Node startup included) on the reference machine; unit test `S5` checks under 300 ms. | Meets S5. |
+
 ## Changes to the design (applied in code)
 
 1. Every measurement run passes `--no-session-persistence` and spawns with stdin ignored.

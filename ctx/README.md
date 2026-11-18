@@ -4,7 +4,7 @@ ctx measures what every new Claude Code session loads up front in a project: bui
 
 It then writes a lean profile to the project's `.claude/settings.local.json`, using only entries it can undo: tool denies, plugins off, and skills set to name-only. Items used in the project's recent sessions are never switched off unless you confirm.
 
-**Status: 0.1.0, milestone 2 (measure, report, plan, apply, undo).** The SessionStart hook and the model-invocable `/ctx:enable` arrive in milestone 3.
+**Status: 0.1.0, milestone 3 (measure, report, plan, apply, undo, session start, re-enable).** Cross-project baselines (`/ctx:global`) and learned triggers arrive in milestone 4.
 
 ## Commands
 
@@ -16,6 +16,7 @@ It then writes a lean profile to the project's `.claude/settings.local.json`, us
 | `/ctx:on <item>` | Switch an item back on (`/ctx:on artifact`) |
 | `/ctx:off <item>` | Switch an item off (`/ctx:off cloudflare`) |
 | `/ctx:undo [all]` | Restore the previous backup, or the original file |
+| `/ctx:enable <item>` | Used by Claude: switches an item back on when a task needs it |
 | `/ctx:doctor` | Shows which `claude` binary is used, the settings files and their scopes, the transcript folders, how fresh the cache is, and whether the profile is in force |
 
 The CLI can also be run directly: `node dist/ctx.mjs help`.
@@ -27,11 +28,21 @@ The CLI can also be run directly: `node dist/ctx.mjs help`.
 - The protected list is never touched: Read, Edit, Write, Glob, Grep, Skill, ToolSearch, AskUserQuestion, Bash, Agent, and PowerShell on Windows when you use it.
 - Settings in other scopes (user, project, managed) are never edited; ctx tells you the file and the key.
 
+## Every new session
+
+A SessionStart hook reads only cached data (about 160 ms, no measuring, no writes). When something is switched off in the project, it gives Claude a short list of what's off, with one line per item, under 400 tokens. It also prints one status line, such as `ctx: lean profile active (11.8K upfront, 24 items trimmed)`. In a large project with no profile, it suggests `/ctx:setup` instead.
+
+When a task needs something from that list, Claude can switch it back on with `/ctx:enable`. If you agreed during setup (the allow rule `Skill(ctx:enable)`, undoable like every other ctx change), it does this without asking. A re-enabled item isn't trimmed again by the next `/ctx:trim`.
+
+A SessionEnd hook refreshes the usage ledger in the background.
+
+The plugin itself costs about 50 tokens per session: the `ctx:enable` line in the skill listing. Its other skills are user-only and aren't listed.
+
 ## Bringing things back mid-session
 
 - **Skills:** they can be invoked by name at once.
 - **Plugins:** run `/reload-plugins`.
-- **Tools:** they can be called at once (`/ctx:on` prints the tool's input schema), but they only show up in the tool list after `/clear` or in a new session.
+- **Tools:** they can be called after about a second (`/ctx:on` waits for that and prints the tool's input schema), but they only show up in the tool list after `/clear` or in a new session.
 
 ## Requirements
 

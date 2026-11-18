@@ -85,6 +85,21 @@ export function installedPlugins(root: string): string[] {
   return out;
 }
 
+/** Plugin id -> description from its plugin.json (installed copy). */
+export function pluginDescriptions(): Record<string, string> {
+  const j = readJson<{ plugins?: Record<string, { installPath?: string }[]> }>(
+    path.join(claudeDir(), 'plugins', 'installed_plugins.json'));
+  const out: Record<string, string> = {};
+  for (const [id, installs] of Object.entries(j?.plugins ?? {})) {
+    for (const i of installs) {
+      if (!i.installPath) continue;
+      const pj = readJson<{ description?: string }>(path.join(i.installPath, '.claude-plugin', 'plugin.json'));
+      if (pj?.description) { out[id] = pj.description; break; }
+    }
+  }
+  return out;
+}
+
 /** Where a given trim rule lives, for "it's set in another scope" messages (spec §8.3). */
 export function findRule(scopes: SettingsFile[], kind: 'deny' | 'plugin' | 'skill', key: string): SettingsFile[] {
   return scopes.filter((s) => {

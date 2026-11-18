@@ -4,9 +4,9 @@ import path from 'node:path';
 import { findClaude, type ClaudeBinary } from './binary.js';
 import { pluginOfSource, type ContextReport } from './parse.js';
 import { projectKey, projectStateDir, readJson, writeJson } from './paths.js';
-import { captureRequest, pool, runContext, type RunSpec } from './runner.js';
+import { captureRequest, firstSentence, pool, runContext, type RunSpec } from './runner.js';
 import {
-  effectivePlugins, installedPlugins, loadScopes, stripTrimKeys, type Json, type SettingsFile,
+  effectivePlugins, installedPlugins, loadScopes, pluginDescriptions, stripTrimKeys, type Json, type SettingsFile,
 } from './settings.js';
 
 export const SEED_TOOLS = [
@@ -56,6 +56,8 @@ export interface Measurement {
   upfrontTools: string[];
   /** Input schemas of upfront tools, so `ctx on` can show Claude how to call a re-enabled tool. */
   toolSchemas: Record<string, unknown>;
+  /** First sentence of each skill's description (from the captured skill listing). */
+  skillDescriptions?: Record<string, string>;
   items: Record<string, ItemMeasurement>;
   skills: { name: string; source: string; tokens: number; plugin?: string }[];
   mcpServers: Record<string, { tools: number; deferredTokens: number }>;
@@ -204,6 +206,8 @@ export async function measure(root: string, opts: MeasureOptions = {}): Promise<
 
   const reference = summarize(refR, refSkills, quirk);
   const items: Record<string, ItemMeasurement> = opts.only && cached ? { ...cached.items } : {};
+  const pluginDesc = pluginDescriptions();
+  for (const [id, d] of Object.entries(pluginDesc)) toolDescriptions.set(id, firstSentence(d));
   for (const { job, r } of results) {
     if (job.id.startsWith('group:')) continue;
     const kind = job.id.startsWith('tool:') ? 'tool' : 'plugin';
@@ -218,7 +222,7 @@ export async function measure(root: string, opts: MeasureOptions = {}): Promise<
       category: kind === 'tool' ? 'System tools' : 'Skills',
       deltaTokens: Math.max(0, reference.correctedTokens - run.correctedTokens),
       method: 'toggle',
-      ...(kind === 'tool' && toolDescriptions.get(name) ? { description: toolDescriptions.get(name) } : {}),
+      ...(toolDescriptions.get(name) ? { description: toolDescriptions.get(name) } : {}),
     };
   }
 
@@ -265,6 +269,7 @@ export async function measure(root: string, opts: MeasureOptions = {}): Promise<
     toolDiscovery: discovery,
     upfrontTools: upfront,
     toolSchemas: Object.keys(toolSchemas).length ? toolSchemas : (cached?.toolSchemas ?? {}),
+    skillDescriptions: cap && Object.keys(cap.skillDescriptions).length ? cap.skillDescriptions : (cached?.skillDescriptions ?? {}),
     items,
     skills: refR.skills.map((s) => ({ name: s.name, source: s.source, tokens: s.tokens, plugin: pluginOfSource(s.source) })),
     mcpServers,

@@ -26,7 +26,10 @@ files yourself; only the CLI writes them.
    any remaining groups). One option per group in the plan output, labelled with the group name and its estimated
    saving. Put "tools", "plugins" and "skills" first. The "rare" group lists items the user did use recently:
    describe it that way and don't preselect or recommend it. Skip the "mcp" group: it is advice only.
-6. **Apply.** `CTX apply --yes --groups <comma-separated confirmed groups>`
+   In the same AskUserQuestion call, ask whether Claude may switch a trimmed item back on by itself when a task
+   needs it (options: "Yes, without asking" - adds the allow rule Skill(ctx:enable); "Ask me each time").
+6. **Apply.** `CTX apply --yes --groups <comma-separated confirmed groups>`, adding `--allow-enable` if the user
+   chose "Yes, without asking".
    If it warns that settings.local.json isn't git-ignored, ask the user, and if they agree re-run with
    `--git-exclude`.
 7. **Hand off.** Relay the verified before/after numbers from the apply output. Tell the user: new sessions
