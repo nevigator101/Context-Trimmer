@@ -4,6 +4,24 @@ import { fingerprint, loadMeasurement, measurementPath } from './measure.js';
 import { claudeJsonPath, ctxHome, projectKey, projectStateDir, readJson, transcriptDirs } from './paths.js';
 import { loadScopes } from './settings.js';
 import { ledgerPath, loadLedger } from './usage.js';
+import { driftedEntries, loadApplied, ownedRefs } from './writer.js';
+
+/** Is the ctx profile in force? Compares applied.json's owned entries with the actual file. */
+export function profileStatus(root: string): string {
+  const a = loadApplied(root);
+  const owned = ownedRefs(a).length;
+  const pre = a.preexisting.deny.length + Object.keys(a.preexisting.plugins).length + Object.keys(a.preexisting.skills).length;
+  if (!owned && !a.history.length) return 'not applied (run /ctx:setup)';
+  const local = loadScopes(root).find((s) => s.scope === 'local');
+  if (local?.error) return `settings.local.json is INVALID (${local.error}); ctx entries can't be checked`;
+  const drift = driftedEntries(local?.data ?? {}, a);
+  const last = a.history.at(-1);
+  const parts = [`${owned} entries owned by ctx`, `${pre} preexisting`];
+  if (last) parts.push(`last change: ${last.action}, ${age(last.at)}`);
+  if (a.verified) parts.push(`verified ${(a.verified.beforeTokens / 1000).toFixed(1)}K -> ${(a.verified.afterTokens / 1000).toFixed(1)}K`);
+  parts.push(drift.length ? `DRIFT: ${drift.join(', ')} changed outside ctx` : 'in force');
+  return parts.join('; ');
+}
 
 function age(iso: string): string {
   const mins = Math.round((Date.now() - Date.parse(iso)) / 60_000);
@@ -53,7 +71,7 @@ export function renderDoctor(root: string): string {
   }
   const l = loadLedger(root);
   out.push(l ? `  usage ledger: ${age(l.builtAt)}, ${l.sessions.length} sessions` : `  usage ledger: none (${ledgerPath(root)})`);
-  out.push('  profile: not applied (ctx apply arrives in M2)');
+  out.push(`  profile: ${profileStatus(root)}`);
   out.push(`  ctx home: ${ctxHome()}`);
   return out.join('\n');
 }

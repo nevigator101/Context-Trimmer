@@ -54,6 +54,8 @@ export interface Measurement {
   skillsQuirk: boolean;
   toolDiscovery: 'capture' | 'seed';
   upfrontTools: string[];
+  /** Input schemas of upfront tools, so `ctx on` can show Claude how to call a re-enabled tool. */
+  toolSchemas: Record<string, unknown>;
   items: Record<string, ItemMeasurement>;
   skills: { name: string; source: string; tokens: number; plugin?: string }[];
   mcpServers: Record<string, { tools: number; deferredTokens: number }>;
@@ -72,8 +74,11 @@ export function loadMeasurement(root: string): Measurement | undefined {
 /** Fingerprint of everything that changes upfront context, so cached costs are reused only when valid. */
 export function fingerprint(root: string, scopes: SettingsFile[], ccVersion: string): string {
   const h = createHash('sha256').update(ccVersion);
+  // The local file is hashed without its trim keys, so applying a profile keeps cached costs valid.
+  const local = scopes.find((s) => s.scope === 'local');
+  h.update(`local:${local?.exists ? JSON.stringify(stripTrimKeys(local.data)) : 'absent'}`);
   const files = [
-    ...scopes.map((s) => s.path),
+    ...scopes.filter((s) => s.scope !== 'local').map((s) => s.path),
     path.join(root, '.mcp.json'),
     path.join(root, 'CLAUDE.md'),
     path.join(root, '.claude', 'CLAUDE.md'),
@@ -146,12 +151,16 @@ export async function measure(root: string, opts: MeasureOptions = {}): Promise<
 
   // Upfront tool list.
   const toolDescriptions = new Map<string, string>();
+  const toolSchemas: Record<string, unknown> = {};
   let upfront: string[];
   let discovery: Measurement['toolDiscovery'] = 'seed';
   if (cap && cap.tools.length) {
     discovery = 'capture';
     upfront = cap.tools.filter((t) => !t.deferred).map((t) => t.name);
-    for (const t of cap.tools) toolDescriptions.set(t.name, t.description);
+    for (const t of cap.tools) {
+      toolDescriptions.set(t.name, t.description);
+      if (!t.deferred && t.inputSchema) toolSchemas[t.name] = t.inputSchema;
+    }
   } else {
     upfront = [...new Set([...SEED_TOOLS, ...Object.keys(cached?.items ?? {}).filter((k) => k.startsWith('tool:')).map((k) => k.slice(5))])];
   }
@@ -255,6 +264,7 @@ export async function measure(root: string, opts: MeasureOptions = {}): Promise<
     skillsQuirk: quirk,
     toolDiscovery: discovery,
     upfrontTools: upfront,
+    toolSchemas: Object.keys(toolSchemas).length ? toolSchemas : (cached?.toolSchemas ?? {}),
     items,
     skills: refR.skills.map((s) => ({ name: s.name, source: s.source, tokens: s.tokens, plugin: pluginOfSource(s.source) })),
     mcpServers,

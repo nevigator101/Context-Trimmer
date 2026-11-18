@@ -1,4 +1,5 @@
 import type { Measurement, RunSummary } from './measure.js';
+import { profileStatus } from './doctor.js';
 import { protectedIds } from './protect.js';
 import { isBareToolRule, loadScopes, type SettingsFile } from './settings.js';
 import { fmtK, fmtK1 } from './tokens.js';
@@ -139,6 +140,7 @@ export function renderReport(root: string, m: Measurement, ledger: Ledger | unde
     .sort((a, b) => b.save - a.save)
     .map((s) => `${s.id} ${fmtK1(s.save)}`);
   out.push(sugg.length ? wrapJoin('Unused here, >=200 tokens: ', sugg) : 'Suggestions: none above 200 tokens.');
-  out.push(`Measured ${m.measuredAt.slice(0, 16).replace('T', ' ')} UTC · re-measure: ctx measure --full`);
+  out.push(`ctx profile: ${profileStatus(root)}`);
+  out.push(`Measured ${m.measuredAt.slice(0, 16).replace('T', ' ')} UTC · /ctx:trim to re-plan · /ctx:on <item> · /ctx:undo to revert`);
   return out.join('\n');
 }

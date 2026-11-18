@@ -86,7 +86,7 @@ export async function pool<T, R>(items: T[], limit: number, fn: (item: T) => Pro
 }
 
 export interface CapturedRequest {
-  tools: { name: string; deferred: boolean; chars: number; description: string }[];
+  tools: { name: string; deferred: boolean; chars: number; description: string; inputSchema?: unknown }[];
   systemChars: number;
   messagesChars: number;
 }
@@ -119,10 +119,11 @@ export async function captureRequest(bin: string, cwd: string, spec: RunSpec): P
   }
   if (!body) return null;
   try {
-    const j = JSON.parse(body) as { system?: unknown; tools?: { name: string; defer_loading?: boolean; description?: string }[]; messages?: unknown };
+    const j = JSON.parse(body) as { system?: unknown; tools?: { name: string; defer_loading?: boolean; description?: string; input_schema?: unknown }[]; messages?: unknown };
     return {
       tools: (j.tools ?? []).map((t) => ({
         name: t.name, deferred: !!t.defer_loading, chars: JSON.stringify(t).length, description: firstSentence(t.description ?? ''),
+        inputSchema: t.input_schema,
       })),
       systemChars: JSON.stringify(j.system ?? '').length,
       messagesChars: JSON.stringify(j.messages ?? []).length,

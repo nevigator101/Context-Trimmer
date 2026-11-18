@@ -2,16 +2,36 @@
 
 ctx measures what every new Claude Code session loads up front in a project: built-in tools, skills, plugins, MCP servers and memory files. It compares that against what the project actually uses, according to the project's own session transcripts, and shows the result in the terminal. Measurements use Claude Code's own `/context` command in headless mode. They make no model call and cost no quota.
 
-**Status: 0.1.0, milestone 1 (measure and report).** Trimming (`/ctx:setup`, `/ctx:trim`, `/ctx:on`, `/ctx:off`, `/ctx:undo`) comes in the next milestone.
+It then writes a lean profile to the project's `.claude/settings.local.json`, using only entries it can undo: tool denies, plugins off, and skills set to name-only. Items used in the project's recent sessions are never switched off unless you confirm.
+
+**Status: 0.1.0, milestone 2 (measure, report, plan, apply, undo).** The SessionStart hook and the model-invocable `/ctx:enable` arrive in milestone 3.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
+| `/ctx:setup` | Onboarding: describe the project, measure, plan, confirm groups, apply, verify |
+| `/ctx:trim` | Re-plan and apply (setup without the describe step) |
 | `/ctx:report` | The upfront breakdown for new sessions, what's switched off and where, usage over the last 10 sessions, and unused items costing 200 tokens or more |
-| `/ctx:doctor` | Shows which `claude` binary is used, the settings files and their scopes, the transcript folders, and how fresh the cache is |
+| `/ctx:on <item>` | Switch an item back on (`/ctx:on artifact`) |
+| `/ctx:off <item>` | Switch an item off (`/ctx:off cloudflare`) |
+| `/ctx:undo [all]` | Restore the previous backup, or the original file |
+| `/ctx:doctor` | Shows which `claude` binary is used, the settings files and their scopes, the transcript folders, how fresh the cache is, and whether the profile is in force |
 
-The CLI can also be run directly: `node dist/ctx.mjs measure --full | usage | report | doctor`.
+The CLI can also be run directly: `node dist/ctx.mjs help`.
+
+## Safety
+
+- ctx only adds or removes the entries it owns. It records them in `~/.claude/ctx/projects/<hash>/applied.json`. Entries you wrote yourself are left alone.
+- Every write is preceded by a backup, made atomically, and checked by re-reading. `undo` restores the file byte for byte, and `undo all` restores the original (or removes the file if it didn't exist).
+- The protected list is never touched: Read, Edit, Write, Glob, Grep, Skill, ToolSearch, AskUserQuestion, Bash, Agent, and PowerShell on Windows when you use it.
+- Settings in other scopes (user, project, managed) are never edited; ctx tells you the file and the key.
+
+## Bringing things back mid-session
+
+- **Skills:** they can be invoked by name at once.
+- **Plugins:** run `/reload-plugins`.
+- **Tools:** they can be called at once (`/ctx:on` prints the tool's input schema), but they only show up in the tool list after `/clear` or in a new session.
 
 ## Requirements
 
@@ -20,7 +40,7 @@ The CLI can also be run directly: `node dist/ctx.mjs measure --full | usage | re
 
 ## Data
 
-ctx keeps its state in `~/.claude/ctx/` (measurements, usage ledger). It reads `~/.claude.json` and never writes it. In this version it doesn't change any settings files.
+ctx keeps its state in `~/.claude/ctx/`: measurements, the usage ledger, plans, the ownership record and backups. It reads `~/.claude.json` and never writes it. The only settings file it writes is the project's `.claude/settings.local.json`.
 
 ## Note on `/context` totals
 

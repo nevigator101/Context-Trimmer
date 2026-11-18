@@ -4,7 +4,7 @@
 function parseArgs(argv) {
   const flags = {};
   const positional = [];
-  const valued = /* @__PURE__ */ new Set(["only", "sessions", "plan", "project", "set", "groups", "reason"]);
+  const valued = /* @__PURE__ */ new Set(["only", "sessions", "plan", "project", "set", "groups", "reason", "level", "min-tokens"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
@@ -18,7 +18,7 @@ function parseArgs(argv) {
 }
 
 // src/doctor.ts
-import fs6 from "node:fs";
+import fs7 from "node:fs";
 
 // src/binary.ts
 import { spawnSync } from "node:child_process";
@@ -377,7 +377,8 @@ async function captureRequest(bin, cwd, spec) {
         name: t.name,
         deferred: !!t.defer_loading,
         chars: JSON.stringify(t).length,
-        description: firstSentence(t.description ?? "")
+        description: firstSentence(t.description ?? ""),
+        inputSchema: t.input_schema
       })),
       systemChars: JSON.stringify(j.system ?? "").length,
       messagesChars: JSON.stringify(j.messages ?? []).length
@@ -463,6 +464,15 @@ function installedPlugins(root) {
   }
   return out;
 }
+function findRule(scopes, kind, key) {
+  return scopes.filter((s) => {
+    const d = s.data;
+    if (!d) return false;
+    if (kind === "deny") return isObj(d.permissions) && Array.isArray(d.permissions.deny) && d.permissions.deny.includes(key);
+    if (kind === "plugin") return isObj(d.enabledPlugins) && d.enabledPlugins[key] === false;
+    return isObj(d.skillOverrides) && key in d.skillOverrides;
+  });
+}
 
 // src/measure.ts
 var SEED_TOOLS = [
@@ -491,8 +501,10 @@ function loadMeasurement(root) {
 }
 function fingerprint(root, scopes, ccVersion) {
   const h = createHash2("sha256").update(ccVersion);
+  const local = scopes.find((s) => s.scope === "local");
+  h.update(`local:${local?.exists ? JSON.stringify(stripTrimKeys(local.data)) : "absent"}`);
   const files = [
-    ...scopes.map((s) => s.path),
+    ...scopes.filter((s) => s.scope !== "local").map((s) => s.path),
     path4.join(root, ".mcp.json"),
     path4.join(root, "CLAUDE.md"),
     path4.join(root, ".claude", "CLAUDE.md")
@@ -556,12 +568,16 @@ async function measure(root, opts = {}) {
   const refR = refRun.report;
   const refSkills = refR.categories["Skills"];
   const toolDescriptions = /* @__PURE__ */ new Map();
+  const toolSchemas = {};
   let upfront;
   let discovery = "seed";
   if (cap && cap.tools.length) {
     discovery = "capture";
     upfront = cap.tools.filter((t) => !t.deferred).map((t) => t.name);
-    for (const t of cap.tools) toolDescriptions.set(t.name, t.description);
+    for (const t of cap.tools) {
+      toolDescriptions.set(t.name, t.description);
+      if (!t.deferred && t.inputSchema) toolSchemas[t.name] = t.inputSchema;
+    }
   } else {
     upfront = [.../* @__PURE__ */ new Set([...SEED_TOOLS, ...Object.keys(cached2?.items ?? {}).filter((k) => k.startsWith("tool:")).map((k) => k.slice(5))])];
   }
@@ -656,6 +672,7 @@ async function measure(root, opts = {}) {
     skillsQuirk: quirk,
     toolDiscovery: discovery,
     upfrontTools: upfront,
+    toolSchemas: Object.keys(toolSchemas).length ? toolSchemas : cached2?.toolSchemas ?? {},
     items,
     skills: refR.skills.map((s) => ({ name: s.name, source: s.source, tokens: s.tokens, plugin: pluginOfSource(s.source) })),
     mcpServers,
@@ -664,6 +681,13 @@ async function measure(root, opts = {}) {
   };
   writeJson(measurementPath(root), m);
   return m;
+}
+async function verifyRun(root, settings, reference, quirk) {
+  const bin = findClaude();
+  if (!bin) throw new Error("Claude Code binary not found.");
+  const r = await runContext(bin.path, root, { settings });
+  if (!r.ok || !r.report) throw new Error(`verification /context failed: ${r.error}`);
+  return summarize(r.report, reference.categories["Skills"], quirk);
 }
 
 // src/usage.ts
@@ -774,8 +798,360 @@ function ledgerPath(root) {
 function loadLedger(root) {
   return readJson(ledgerPath(root));
 }
+function globalSkillCount(l, skill) {
+  const g = l.global.skillUsage;
+  return (g[skill]?.usageCount ?? 0) + (g[`anthropic-skills:${skill}`]?.usageCount ?? 0);
+}
+
+// src/writer.ts
+import { createHash as createHash3 } from "node:crypto";
+import fs6 from "node:fs";
+import path6 from "node:path";
+var emptyEntries = () => ({ deny: [], plugins: {}, skills: {}, mcpjson: [] });
+function emptyApplied(file) {
+  return { version: 1, file, owned: emptyEntries(), preexisting: emptyEntries(), history: [] };
+}
+var KEEP_BACKUPS = 20;
+function appliedPath(root) {
+  return path6.join(projectStateDir(root), "applied.json");
+}
+function backupDir(root) {
+  return path6.join(projectStateDir(root), "backups");
+}
+function loadApplied(root) {
+  return readJson(appliedPath(root)) ?? emptyApplied(localSettingsPath(root));
+}
+var realOps = { renameSync: fs6.renameSync };
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function sha(b) {
+  return createHash3("sha256").update(b).digest("hex");
+}
+function detectStyle(raw) {
+  if (!raw) return { indent: 2, eol: "\n", finalNewline: true };
+  const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+  const m = raw.match(/\n([ \t]+)\S/);
+  const indent = m ? m[1].startsWith("	") ? "	" : m[1].length : 2;
+  return { indent, eol, finalNewline: /\r?\n$/.test(raw) };
+}
+function serialize(obj, style) {
+  let s = JSON.stringify(obj, null, style.indent);
+  if (style.eol === "\r\n") s = s.replace(/\n/g, "\r\n");
+  return style.finalNewline ? s + style.eol : s;
+}
+function atomicWrite(file, data, ops = realOps) {
+  fs6.mkdirSync(path6.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp`;
+  const fd = fs6.openSync(tmp, "w");
+  try {
+    fs6.writeSync(fd, typeof data === "string" ? Buffer.from(data, "utf8") : data);
+    fs6.fsyncSync(fd);
+  } finally {
+    fs6.closeSync(fd);
+  }
+  let lastErr;
+  for (let i = 0; i < 6; i++) {
+    try {
+      ops.renameSync(tmp, file);
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (i < 5) sleepSync(100);
+    }
+  }
+  try {
+    fs6.unlinkSync(tmp);
+  } catch {
+  }
+  throw new Error(`could not replace ${file}: ${lastErr?.message ?? lastErr}`);
+}
+function newBackupId(dir) {
+  let id = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  let n = 0;
+  while (fs6.existsSync(path6.join(dir, `${id}.state.json`))) id = `${id.replace(/_\d+$/, "")}_${++n}`;
+  return id;
+}
+function backup(root) {
+  const dir = backupDir(root);
+  fs6.mkdirSync(dir, { recursive: true });
+  const id = newBackupId(dir);
+  const file = localSettingsPath(root);
+  const exists = fs6.existsSync(file);
+  if (exists) fs6.copyFileSync(file, path6.join(dir, `${id}.settings.local.json`));
+  const applied = readJson(appliedPath(root));
+  fs6.writeFileSync(path6.join(dir, `${id}.state.json`), JSON.stringify({ settingsExisted: exists, applied: applied ?? null }));
+  return id;
+}
+function listBackups(root) {
+  try {
+    return fs6.readdirSync(backupDir(root)).filter((f) => f.endsWith(".state.json")).map((f) => f.slice(0, -".state.json".length)).sort();
+  } catch {
+    return [];
+  }
+}
+function pruneBackups(root, keep) {
+  const all = listBackups(root).filter((b) => b !== keep);
+  for (const id of all.slice(0, Math.max(0, all.length - KEEP_BACKUPS))) removeBackup(root, id);
+}
+function removeBackup(root, id) {
+  for (const suffix of [".settings.local.json", ".state.json"]) {
+    try {
+      fs6.unlinkSync(path6.join(backupDir(root), id + suffix));
+    } catch {
+    }
+  }
+}
+function restoreBackup(root, id, ops = realOps) {
+  const dir = backupDir(root);
+  const st = JSON.parse(fs6.readFileSync(path6.join(dir, `${id}.state.json`), "utf8"));
+  const file = localSettingsPath(root);
+  if (st.settingsExisted) atomicWrite(file, fs6.readFileSync(path6.join(dir, `${id}.settings.local.json`)), ops);
+  else if (fs6.existsSync(file)) fs6.unlinkSync(file);
+  if (st.applied) writeJson(appliedPath(root), st.applied);
+  else try {
+    fs6.unlinkSync(appliedPath(root));
+  } catch {
+  }
+}
+function writeSettings(root, action, mutate, ops = realOps) {
+  const file = localSettingsPath(root);
+  const raw = fs6.existsSync(file) ? fs6.readFileSync(file, "utf8") : void 0;
+  let settings = {};
+  if (raw !== void 0 && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not a JSON object");
+      settings = parsed;
+    } catch (e) {
+      throw new Error(`${file} is not valid JSON (${e.message}); ctx won't overwrite it. Fix it first.`);
+    }
+  }
+  const applied = loadApplied(root);
+  const id = backup(root);
+  if (!applied.originalBackup) applied.originalBackup = id;
+  const changes = mutate(settings, applied);
+  if (!changes.length) {
+    removeBackup(root, id);
+    if (applied.originalBackup === id) delete applied.originalBackup;
+    return { backup: "", changes, file };
+  }
+  const text = serialize(settings, detectStyle(raw));
+  try {
+    atomicWrite(file, text, ops);
+    JSON.parse(fs6.readFileSync(file, "utf8"));
+  } catch (e) {
+    try {
+      restoreBackup(root, id);
+    } catch {
+    }
+    throw new Error(`write failed, original restored: ${e.message}`);
+  }
+  applied.lastWrittenHash = sha(text);
+  applied.history.push({ at: (/* @__PURE__ */ new Date()).toISOString(), action, backup: id, summary: changes.join("; ").slice(0, 500) });
+  writeJson(appliedPath(root), applied);
+  pruneBackups(root, applied.originalBackup);
+  return { backup: id, changes, file };
+}
+function editedSinceWrite(root, applied) {
+  const file = localSettingsPath(root);
+  if (!applied.lastWrittenHash) return false;
+  if (!fs6.existsSync(file)) return true;
+  return sha(fs6.readFileSync(file, "utf8")) !== applied.lastWrittenHash;
+}
+function undo(root, all = false, ops = realOps) {
+  const applied = loadApplied(root);
+  const backups = listBackups(root);
+  if (!backups.length) throw new Error("nothing to undo: ctx has no backups for this project");
+  const target = all ? applied.originalBackup ?? backups[0] : backups[backups.length - 1];
+  let manual;
+  if (editedSinceWrite(root, applied)) {
+    const dir = backupDir(root);
+    manual = `${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.pre-undo.settings.local.json`;
+    const file2 = localSettingsPath(root);
+    if (fs6.existsSync(file2)) fs6.copyFileSync(file2, path6.join(dir, manual));
+  }
+  restoreBackup(root, target, ops);
+  const st = JSON.parse(fs6.readFileSync(path6.join(backupDir(root), `${target}.state.json`), "utf8"));
+  const original = applied.originalBackup;
+  for (const b of backups.filter((b2) => b2 >= target)) if (b !== original) removeBackup(root, b);
+  const after = loadApplied(root);
+  const file = localSettingsPath(root);
+  after.lastWrittenHash = fs6.existsSync(file) ? sha(fs6.readFileSync(file, "utf8")) : void 0;
+  after.originalBackup = original;
+  if (all) {
+    after.owned = emptyEntries();
+    after.preexisting = emptyEntries();
+    delete after.verified;
+  }
+  after.history = [...applied.history, { at: (/* @__PURE__ */ new Date()).toISOString(), action: all ? "undo all" : "undo", backup: target, summary: `restored ${target}` }];
+  writeJson(appliedPath(root), after);
+  return { restored: target, manualEditsSaved: manual, deleted: !st.settingsExisted };
+}
+var isObj2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+function denyList(s, create) {
+  if (!isObj2(s.permissions)) {
+    if (!create) return void 0;
+    s.permissions = {};
+  }
+  const p = s.permissions;
+  if (!Array.isArray(p.deny)) {
+    if (!create) return void 0;
+    p.deny = [];
+  }
+  return p.deny;
+}
+function objKey(s, key, create) {
+  if (!isObj2(s[key])) {
+    if (!create) return void 0;
+    s[key] = {};
+  }
+  return s[key];
+}
+function cleanupEmpty(s) {
+  if (isObj2(s.permissions)) {
+    if (Array.isArray(s.permissions.deny) && !s.permissions.deny.length) delete s.permissions.deny;
+    if (!Object.keys(s.permissions).length) delete s.permissions;
+  }
+  for (const k of ["enabledPlugins", "skillOverrides"]) if (isObj2(s[k]) && !Object.keys(s[k]).length) delete s[k];
+  if (Array.isArray(s.disabledMcpjsonServers) && !s.disabledMcpjsonServers.length) delete s.disabledMcpjsonServers;
+}
+function describeRef(r) {
+  if (r.kind === "tool") return `deny ${r.name}`;
+  if (r.kind === "plugin") return `plugin ${r.id} off`;
+  if (r.kind === "skill") return `skill ${r.name} ${r.level}`;
+  return `.mcp.json server ${r.name} off`;
+}
+function setEntry(s, a, r) {
+  if (r.kind === "tool") {
+    const deny = denyList(s, true);
+    if (deny.includes(r.name)) {
+      if (!a.owned.deny.includes(r.name) && !a.preexisting.deny.includes(r.name)) a.preexisting.deny.push(r.name);
+      return void 0;
+    }
+    deny.push(r.name);
+    a.owned.deny.push(r.name);
+    return describeRef(r);
+  }
+  if (r.kind === "plugin") {
+    const ep = objKey(s, "enabledPlugins", true);
+    if (ep[r.id] === false) {
+      if (!(r.id in a.owned.plugins)) a.preexisting.plugins[r.id] = false;
+      return void 0;
+    }
+    if (r.id in ep && !(r.id in a.owned.plugins)) return `skipped plugin ${r.id}: set to ${String(ep[r.id])} by you`;
+    ep[r.id] = false;
+    a.owned.plugins[r.id] = false;
+    return describeRef(r);
+  }
+  if (r.kind === "skill") {
+    const so = objKey(s, "skillOverrides", true);
+    if (so[r.name] === r.level) {
+      if (!(r.name in a.owned.skills)) a.preexisting.skills[r.name] = r.level;
+      return void 0;
+    }
+    if (r.name in so && !(r.name in a.owned.skills)) return `skipped skill ${r.name}: set to "${String(so[r.name])}" by you`;
+    so[r.name] = r.level;
+    a.owned.skills[r.name] = r.level;
+    return describeRef(r);
+  }
+  if (!Array.isArray(s.disabledMcpjsonServers)) s.disabledMcpjsonServers = [];
+  const list = s.disabledMcpjsonServers;
+  if (list.includes(r.name)) {
+    if (!a.owned.mcpjson.includes(r.name)) a.preexisting.mcpjson.push(r.name);
+    return void 0;
+  }
+  list.push(r.name);
+  a.owned.mcpjson.push(r.name);
+  return describeRef(r);
+}
+function clearEntry(s, a, r, force = false) {
+  const drop = (arr, v) => {
+    const i = arr.indexOf(v);
+    if (i >= 0) arr.splice(i, 1);
+  };
+  let result = "absent";
+  if (r.kind === "tool") {
+    const deny = denyList(s, false);
+    if (deny?.includes(r.name)) {
+      if (a.owned.deny.includes(r.name) || force) {
+        drop(deny, r.name);
+        drop(a.owned.deny, r.name);
+        drop(a.preexisting.deny, r.name);
+        result = "removed";
+      } else result = "not-owned";
+    }
+  } else if (r.kind === "plugin") {
+    const ep = objKey(s, "enabledPlugins", false);
+    if (ep && ep[r.id] === false) {
+      if (r.id in a.owned.plugins || force) {
+        delete ep[r.id];
+        delete a.owned.plugins[r.id];
+        delete a.preexisting.plugins[r.id];
+        result = "removed";
+      } else result = "not-owned";
+    }
+  } else if (r.kind === "skill") {
+    const so = objKey(s, "skillOverrides", false);
+    if (so && r.name in so && so[r.name] !== "on") {
+      if (r.name in a.owned.skills || force) {
+        delete so[r.name];
+        delete a.owned.skills[r.name];
+        delete a.preexisting.skills[r.name];
+        result = "removed";
+      } else result = "not-owned";
+    }
+  } else {
+    const list = Array.isArray(s.disabledMcpjsonServers) ? s.disabledMcpjsonServers : void 0;
+    if (list?.includes(r.name)) {
+      if (a.owned.mcpjson.includes(r.name) || force) {
+        drop(list, r.name);
+        drop(a.owned.mcpjson, r.name);
+        result = "removed";
+      } else result = "not-owned";
+    }
+  }
+  cleanupEmpty(s);
+  return result;
+}
+function ownedRefs(a) {
+  return [
+    ...a.owned.deny.map((name) => ({ kind: "tool", name })),
+    ...Object.keys(a.owned.plugins).map((id) => ({ kind: "plugin", id })),
+    ...Object.entries(a.owned.skills).map(([name, level]) => ({ kind: "skill", name, level })),
+    ...a.owned.mcpjson.map((name) => ({ kind: "mcpjson", name }))
+  ];
+}
+function refKey(r) {
+  return r.kind === "plugin" ? `plugin:${r.id}` : r.kind === "mcpjson" ? `mcpjson:${r.name}` : `${r.kind}:${r.name}`;
+}
+function driftedEntries(settings, a) {
+  const out = [];
+  const deny = isObj2(settings.permissions) && Array.isArray(settings.permissions.deny) ? settings.permissions.deny : [];
+  for (const t of a.owned.deny) if (!deny.includes(t)) out.push(`tool:${t}`);
+  const ep = isObj2(settings.enabledPlugins) ? settings.enabledPlugins : {};
+  for (const p of Object.keys(a.owned.plugins)) if (ep[p] !== false) out.push(`plugin:${p}`);
+  const so = isObj2(settings.skillOverrides) ? settings.skillOverrides : {};
+  for (const [k, v] of Object.entries(a.owned.skills)) if (so[k] !== v) out.push(`skill:${k}`);
+  return out;
+}
 
 // src/doctor.ts
+function profileStatus(root) {
+  const a = loadApplied(root);
+  const owned = ownedRefs(a).length;
+  const pre = a.preexisting.deny.length + Object.keys(a.preexisting.plugins).length + Object.keys(a.preexisting.skills).length;
+  if (!owned && !a.history.length) return "not applied (run /ctx:setup)";
+  const local = loadScopes(root).find((s) => s.scope === "local");
+  if (local?.error) return `settings.local.json is INVALID (${local.error}); ctx entries can't be checked`;
+  const drift = driftedEntries(local?.data ?? {}, a);
+  const last = a.history.at(-1);
+  const parts = [`${owned} entries owned by ctx`, `${pre} preexisting`];
+  if (last) parts.push(`last change: ${last.action}, ${age(last.at)}`);
+  if (a.verified) parts.push(`verified ${(a.verified.beforeTokens / 1e3).toFixed(1)}K -> ${(a.verified.afterTokens / 1e3).toFixed(1)}K`);
+  parts.push(drift.length ? `DRIFT: ${drift.join(", ")} changed outside ctx` : "in force");
+  return parts.join("; ");
+}
 function age(iso) {
   const mins = Math.round((Date.now() - Date.parse(iso)) / 6e4);
   if (mins < 60) return `${mins} min ago`;
@@ -790,7 +1166,7 @@ function renderDoctor(root) {
   if (bin) out.push(`  claude binary: ${bin.path}  (v${bin.version}, via ${bin.source})`);
   else {
     out.push("  claude binary: NOT FOUND. Set CTX_CLAUDE_BIN to the full path of claude(.exe). Checked:");
-    for (const c of candidates()) out.push(`    - ${c.path} (${c.source})${fs6.existsSync(c.path) ? " [exists, --version failed]" : ""}`);
+    for (const c of candidates()) out.push(`    - ${c.path} (${c.source})${fs7.existsSync(c.path) ? " [exists, --version failed]" : ""}`);
   }
   out.push("  settings files:");
   const scopes = loadScopes(root);
@@ -801,7 +1177,7 @@ function renderDoctor(root) {
   const dirs = transcriptDirs(root);
   out.push(`  transcript dirs: ${dirs.length ? "" : "none found"}`);
   for (const d of dirs) {
-    const n = fs6.readdirSync(d).filter((f) => f.endsWith(".jsonl")).length;
+    const n = fs7.readdirSync(d).filter((f) => f.endsWith(".jsonl")).length;
     out.push(`    ${d}  (${n} sessions)`);
   }
   const cj = readJson(claudeJsonPath());
@@ -818,23 +1194,23 @@ function renderDoctor(root) {
   }
   const l = loadLedger(root);
   out.push(l ? `  usage ledger: ${age(l.builtAt)}, ${l.sessions.length} sessions` : `  usage ledger: none (${ledgerPath(root)})`);
-  out.push("  profile: not applied (ctx apply arrives in M2)");
+  out.push(`  profile: ${profileStatus(root)}`);
   out.push(`  ctx home: ${ctxHome()}`);
   return out.join("\n");
 }
 
 // src/protect.ts
-import fs7 from "node:fs";
-import path6 from "node:path";
+import fs8 from "node:fs";
+import path7 from "node:path";
 var ALWAYS = ["Read", "Edit", "Write", "Glob", "Grep", "Skill", "ToolSearch", "AskUserQuestion", "EndConversation"];
 function claudeMdMentions(word) {
-  for (const f of [path6.join(claudeDir(), "CLAUDE.md")]) {
+  for (const f of [path7.join(claudeDir(), "CLAUDE.md")]) {
     try {
-      const text = fs7.readFileSync(f, "utf8");
+      const text = fs8.readFileSync(f, "utf8");
       if (text.includes(word)) return true;
       for (const m of text.matchAll(/^@(\S+)/gm)) {
         try {
-          if (fs7.readFileSync(path6.resolve(path6.dirname(f), m[1]), "utf8").includes(word)) return true;
+          if (fs8.readFileSync(path7.resolve(path7.dirname(f), m[1]), "utf8").includes(word)) return true;
         } catch {
         }
       }
@@ -936,12 +1312,12 @@ function renderReport(root, m, ledger) {
     const n = ledger?.items[id]?.sessionsUsed ?? 0;
     return n ? `, USED in ${n} recent session${n === 1 ? "" : "s"}` : "";
   };
-  const off = [];
-  for (const t of trims.tools) off.push(`tool ${t.name} (${fmtK1(m.items[`tool:${t.name}`]?.deltaTokens ?? 0)}${t.scope !== "local" ? `, ${t.scope}` : ""}${usedNote(`tool:${t.name}`)})`);
-  for (const p of trims.plugins) off.push(`plugin ${p.id.split("@")[0]} (${fmtK1(m.items[`plugin:${p.id}`]?.deltaTokens ?? 0)}${p.scope !== "local" ? `, ${p.scope}` : ""})`);
+  const off2 = [];
+  for (const t of trims.tools) off2.push(`tool ${t.name} (${fmtK1(m.items[`tool:${t.name}`]?.deltaTokens ?? 0)}${t.scope !== "local" ? `, ${t.scope}` : ""}${usedNote(`tool:${t.name}`)})`);
+  for (const p of trims.plugins) off2.push(`plugin ${p.id.split("@")[0]} (${fmtK1(m.items[`plugin:${p.id}`]?.deltaTokens ?? 0)}${p.scope !== "local" ? `, ${p.scope}` : ""})`);
   const offSkills = trims.skills.filter((s) => s.level === "off");
-  for (const s of offSkills) off.push(`skill ${s.name} (off)`);
-  out.push(off.length ? wrapJoin("Switched off:  ", off) : "Switched off:  nothing");
+  for (const s of offSkills) off2.push(`skill ${s.name} (off)`);
+  out.push(off2.length ? wrapJoin("Switched off:  ", off2) : "Switched off:  nothing");
   if (ledger) {
     const used = Object.entries(ledger.items).filter(([id]) => id.startsWith("tool:") || id.startsWith("skill:") || id.startsWith("mcp:")).sort((a, b) => b[1].sessionsUsed - a[1].sessionsUsed || b[1].calls - a[1].calls).map(([id, u]) => `${id.replace(/^tool:/, "").replace(/^skill:/, "skill ").replace(/^mcp:/, "mcp ")} ${u.sessionsUsed}`);
     out.push(wrapJoin(`Usage, last ${ledger.sessions.length} sessions (sessions used): `, used.slice(0, 14), 2) + (used.length > 14 ? " \xB7 ..." : ""));
@@ -957,11 +1333,611 @@ function renderReport(root, m, ledger) {
   const usedPlugins = new Set(Object.keys(ledger?.items ?? {}).filter((id) => id.startsWith("skill:") && id.includes(":", 6)).map((id) => id.slice(6).split(":")[0]));
   const sugg = Object.entries(m.items).filter(([id, it]) => (it.kind === "tool" || it.kind === "plugin" || it.kind === "skill") && !prot.has(id) && !trimmedIds.has(id)).filter(([id]) => !ledger?.items[id]?.sessionsUsed).filter(([id]) => !(id.startsWith("plugin:") && usedPlugins.has(id.slice(7).split("@")[0]))).map(([id, it]) => ({ id, save: it.kind === "skill" ? it.softDeltaTokens ?? 0 : it.deltaTokens })).filter((s) => s.save >= 200).sort((a, b) => b.save - a.save).map((s) => `${s.id} ${fmtK1(s.save)}`);
   out.push(sugg.length ? wrapJoin("Unused here, >=200 tokens: ", sugg) : "Suggestions: none above 200 tokens.");
-  out.push(`Measured ${m.measuredAt.slice(0, 16).replace("T", " ")} UTC \xB7 re-measure: ctx measure --full`);
+  out.push(`ctx profile: ${profileStatus(root)}`);
+  out.push(`Measured ${m.measuredAt.slice(0, 16).replace("T", " ")} UTC \xB7 /ctx:trim to re-plan \xB7 /ctx:on <item> \xB7 /ctx:undo to revert`);
   return out.join("\n");
 }
 
+// src/commands.ts
+import { spawnSync as spawnSync2 } from "node:child_process";
+import fs9 from "node:fs";
+import path10 from "node:path";
+
+// src/plan.ts
+import path9 from "node:path";
+
+// src/deps.json
+var deps_default = {
+  _comment: "Spec \xA77.2. 'skills': skills that need the item; they go to name-only with it, and if one is used or kept, the item is kept.",
+  "tool:Artifact": { skills: ["artifact-design", "artifact-diagramming", "artifact-capabilities"] },
+  "tool:ScheduleWakeup": { skills: ["loop"] },
+  "tool:ReportFindings": { skills: ["code-review"] }
+};
+
+// src/profile.ts
+import path8 from "node:path";
+function profilePath(root) {
+  return path8.join(projectStateDir(root), "project-profile.json");
+}
+function loadProfile(root) {
+  return readJson(profilePath(root));
+}
+var strArray = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string" && !!x.trim()).map((x) => x.trim()) : void 0;
+function setProfile(root, patchJson) {
+  let patch;
+  try {
+    patch = JSON.parse(patchJson);
+  } catch (e) {
+    throw new Error(`profile --set expects JSON: ${e.message}`);
+  }
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw new Error("profile --set expects a JSON object");
+  const cur = loadProfile(root) ?? { createdAt: (/* @__PURE__ */ new Date()).toISOString() };
+  const next = { ...cur };
+  if (typeof patch.summary === "string") next.summary = patch.summary.trim();
+  for (const k of ["stack", "services", "workTypes", "keep"]) {
+    const v = strArray(patch[k]);
+    if (v) next[k] = v;
+  }
+  next.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  writeJson(profilePath(root), next);
+  return next;
+}
+var WORK_TYPE_KEYWORDS = {
+  docs: ["docx", "pdf", "pptx", "xlsx", "docs", "google-workspace", "artifact", "dataviz"],
+  documents: ["docx", "pdf", "pptx", "xlsx", "docs", "google-workspace"],
+  media: ["watch", "video", "image", "dataviz"],
+  deploys: ["deploy", "cloudflare", "wrangler", "vercel", "docker", "schedule"],
+  research: ["deep-research", "web", "browser", "chrome"],
+  web: ["browser", "chrome", "artifact", "built-in-browser"],
+  data: ["xlsx", "dataviz", "pdf"],
+  code: ["code-review", "security-review", "simplify"]
+};
+function profileKeywords(p) {
+  if (!p) return [];
+  const out = /* @__PURE__ */ new Set();
+  for (const s of [...p.stack ?? [], ...p.services ?? []]) for (const w of s.toLowerCase().split(/[^a-z0-9-]+/)) if (w.length >= 3) out.add(w);
+  for (const w of p.workTypes ?? []) for (const k of WORK_TYPE_KEYWORDS[w.toLowerCase()] ?? [w.toLowerCase()]) out.add(k);
+  return [...out];
+}
+
+// src/plan.ts
+var DEPS = deps_default;
+function planPath(root) {
+  return path9.join(projectStateDir(root), "plan.json");
+}
+function loadPlan(root) {
+  return readJson(planPath(root));
+}
+function savePlan(root, p) {
+  writeJson(planPath(root), p);
+}
+function nameOf(id) {
+  return id.slice(id.indexOf(":") + 1);
+}
+function pluginName(id) {
+  return nameOf(id).split("@")[0];
+}
+function pluginSessions(ledger, plugin) {
+  if (!ledger) return 0;
+  let n = 0;
+  for (const [id, u] of Object.entries(ledger.items)) {
+    if (id.startsWith(`skill:${plugin}:`) || id.startsWith(`agent:${plugin}:`)) n = Math.max(n, u.sessionsUsed);
+  }
+  return n;
+}
+function matchesSignal(id, keywords) {
+  const name = nameOf(id).toLowerCase();
+  return keywords.find((k) => name.includes(k) || k.length >= 4 && k.includes(name));
+}
+function buildPlan(m, ledger, profile, opts) {
+  const min = opts.minTokens ?? 200;
+  const rareMin = opts.rareMinTokens ?? 2e3;
+  const keywords = profileKeywords(profile);
+  const window = ledger?.sessions.length ?? 0;
+  const items = [];
+  const notes = [];
+  const used = (id) => ledger?.items[id]?.sessionsUsed ?? 0;
+  const reenabled = (id) => (ledger?.reenables[id] ?? []).length;
+  for (const [id, it] of Object.entries(m.items)) {
+    if (it.kind === "memory") continue;
+    if (it.kind === "mcp") {
+      const n = used(id);
+      items.push(n ? { id, kind: "mcp", class: "used", action: "none", saveTokens: 0, reason: `used in ${n} of ${window} sessions` } : {
+        id,
+        kind: "mcp",
+        class: "mcp",
+        action: "suggest",
+        saveTokens: 0,
+        group: "mcp",
+        reason: "not used here; tools are deferred, so only names and instructions cost tokens. Toggle with /mcp"
+      });
+      continue;
+    }
+    const kind = it.kind;
+    const full = it.deltaTokens;
+    const soft = it.softDeltaTokens ?? 0;
+    const sessions = kind === "plugin" ? pluginSessions(ledger, pluginName(id)) : used(id);
+    const push = (c, action, reason, group) => {
+      const saveTokens = action === "none" ? 0 : kind === "skill" && action === "soft" ? soft : full;
+      items.push({ id, kind, class: c, action, saveTokens, reason, ...group ? { group } : {} });
+    };
+    const offGroup = kind === "tool" ? "tools" : kind === "plugin" ? "plugins" : "skills-off";
+    if (it.unmeasured) {
+      push("negligible", "none", `not measured (${it.unmeasured})`);
+      continue;
+    }
+    if (opts.protectedIds.has(id)) {
+      push("protected", "none", "protected");
+      continue;
+    }
+    if (profile?.keep?.includes(id)) {
+      push("kept", "none", "pinned in the project profile");
+      continue;
+    }
+    if (reenabled(id) >= 2) {
+      push("used", "none", `re-enabled ${reenabled(id)} times recently`);
+      continue;
+    }
+    if (sessions > 0) {
+      if (kind !== "skill" && full >= rareMin && sessions <= 1 && window >= 2) {
+        push("rare", "off", `used in only ${sessions} of ${window} sessions (opt-in)`, "rare");
+      } else {
+        push("used", "none", `used in ${sessions} of ${window} sessions`);
+      }
+      continue;
+    }
+    const signal = matchesSignal(id, keywords);
+    if (signal) {
+      if (kind === "skill" && soft >= min / 4) push("likely", "soft", `matches project signal "${signal}"`, "skills");
+      else push("likely", "none", `matches project signal "${signal}"`);
+      continue;
+    }
+    const global = kind === "skill" ? globalSkillCount(ledger ?? emptyLedger(), nameOf(id)) : kind === "plugin" ? ledger?.global.pluginUsage[nameOf(id)]?.usageCount ?? 0 : 0;
+    if (global > 0) {
+      if (kind === "plugin" && full >= min / 2) {
+        push("foreign", "off", `used in other projects (${global}x), never here`, "plugins");
+        continue;
+      }
+      if (kind === "skill" && soft > 0 && full >= min / 4) {
+        push("foreign", "soft", `used in other projects (${global}x), never here`, "skills");
+        continue;
+      }
+      push("negligible", "none", `used elsewhere; ${fmtK1(full)} here`);
+      continue;
+    }
+    if (full >= min) {
+      if (kind === "skill") {
+        if (opts.aggressive) push("unused", "off", "never used", "skills-off");
+        else push("unused", "soft", "never used", "skills");
+      } else {
+        push("unused", "off", "never used", offGroup);
+      }
+      continue;
+    }
+    push("negligible", "none", `never used, ${fmtK1(full)}`);
+  }
+  const byId = new Map(items.map((i) => [i.id, i]));
+  for (const [dep, d] of Object.entries(DEPS)) {
+    const it = byId.get(dep);
+    if (!it || it.action === "none") continue;
+    const keeper = (d.skills ?? []).find((s) => {
+      const si = byId.get(`skill:${s}`);
+      return si && ["protected", "kept", "used", "likely"].includes(si.class) && si.action === "none";
+    });
+    if (keeper) {
+      Object.assign(it, { class: "needed", action: "none", saveTokens: 0, reason: `needed by skill ${keeper}` });
+      delete it.group;
+      continue;
+    }
+    for (const s of d.skills ?? []) {
+      const si = byId.get(`skill:${s}`);
+      if (si && si.action === "none" && !["protected", "kept", "used"].includes(si.class)) {
+        const mi = m.items[`skill:${s}`];
+        Object.assign(si, { action: "soft", saveTokens: mi?.softDeltaTokens ?? 0, reason: `goes with ${dep} (dependency)`, group: it.group });
+      }
+    }
+  }
+  const trimmed = items.filter((i) => i.action === "off" || i.action === "soft");
+  if (!window) notes.push("No usage history for this project yet: every item counts as unused. Review the plan carefully.");
+  if (trimmed.some((i) => i.group === "rare")) notes.push('The "rare" group holds items you used recently; it is applied only if you select it.');
+  return {
+    project: m.project,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    measuredAt: m.measuredAt,
+    ccVersion: m.ccVersion,
+    windowSessions: window,
+    aggressive: !!opts.aggressive,
+    minTokens: min,
+    reviewed: false,
+    notes,
+    items: items.sort((a, b) => b.saveTokens - a.saveTokens || a.id.localeCompare(b.id))
+  };
+}
+function emptyLedger() {
+  return { project: "", builtAt: "", sessionsScanned: 0, window: { sessions: 0 }, sessions: [], items: {}, reenables: {}, global: { skillUsage: {}, pluginUsage: {} } };
+}
+var RANK = { none: 0, suggest: 0, soft: 1, off: 2 };
+function reviewPlan(draft, reviewJson) {
+  let parsed;
+  try {
+    parsed = JSON.parse(reviewJson);
+  } catch (e) {
+    throw new Error(`plan --set expects JSON: ${e.message}`);
+  }
+  const plan = JSON.parse(JSON.stringify(draft));
+  const byId = new Map(plan.items.map((i) => [i.id, i]));
+  const rejected = [];
+  const changed = [];
+  for (const r of parsed.items ?? []) {
+    const id = String(r.id ?? "");
+    const action = String(r.action ?? "");
+    const it = byId.get(id);
+    if (!it) {
+      rejected.push(`${id}: not in the plan`);
+      continue;
+    }
+    if (!(action in RANK) || action === "suggest") {
+      rejected.push(`${id}: unknown action "${action}"`);
+      continue;
+    }
+    if (action === it.action) continue;
+    const ok = RANK[action] < RANK[it.action] || it.action === "none" && action === "soft" && it.kind === "skill" && it.class !== "protected";
+    if (!ok) {
+      rejected.push(`${id}: ${it.action} -> ${action} would trim more than the rules allow`);
+      continue;
+    }
+    if (action === "soft" && it.kind !== "skill") {
+      rejected.push(`${id}: only skills have a soft level`);
+      continue;
+    }
+    changed.push(`${id}: ${it.action} -> ${action}`);
+    it.action = action;
+    it.reason = typeof r.reason === "string" && r.reason ? `review: ${r.reason}` : `review: ${it.action}`;
+    if (action === "none") {
+      it.saveTokens = 0;
+      delete it.group;
+    }
+    if (action === "soft") {
+      it.group = "skills";
+    }
+  }
+  if (Array.isArray(parsed.notes)) plan.notes.push(...parsed.notes.filter((n) => typeof n === "string").map((n) => `review: ${n}`));
+  plan.reviewed = true;
+  return { plan, rejected, changed };
+}
+var GROUP_LABEL = {
+  tools: "Deny unused built-in tools",
+  plugins: "Switch off plugins not used here",
+  skills: "Unused skills to name-only (still callable by name)",
+  "skills-off": "Unused skills fully off (aggressive)",
+  rare: "Costly items used only once recently (opt-in)",
+  mcp: "MCP servers not used here (suggestion; toggle with /mcp)"
+};
+function groupSummary(plan) {
+  const order = ["tools", "plugins", "skills", "skills-off", "rare", "mcp"];
+  return order.map((g) => {
+    const items = plan.items.filter((i) => i.group === g && i.action !== "none");
+    return { group: g, items, tokens: items.reduce((a, i) => a + i.saveTokens, 0) };
+  }).filter((g) => g.items.length);
+}
+function renderPlan(plan, m) {
+  const out = [];
+  out.push(`ctx plan: ${projectKey(plan.project)}   (untrimmed ${fmtK1(m.reference.correctedTokens)}, usage window ${plan.windowSessions} sessions${plan.aggressive ? ", aggressive" : ""}${plan.reviewed ? ", reviewed" : ""})`);
+  out.push("");
+  for (const g of groupSummary(plan)) {
+    const est = g.group === "mcp" ? "" : `   est. -${fmtK1(g.tokens)}`;
+    out.push(`[${g.group}] ${GROUP_LABEL[g.group]}${est}`);
+    for (const i of g.items) {
+      out.push(`  ${i.id.padEnd(38)} ${i.group === "mcp" ? "      " : fmtK1(i.saveTokens).padStart(6)}  ${i.action.padEnd(5)} ${i.reason}`.slice(0, 100));
+    }
+    out.push("");
+  }
+  const keep = plan.items.filter((i) => i.action === "none" && i.kind !== "mcp" && ["used", "protected", "kept", "needed", "likely"].includes(i.class));
+  out.push(wrapJoin("Kept on: ", keep.map((i) => `${nameOf(i.id)} (${i.class})`)));
+  for (const n of plan.notes) out.push(`Note: ${n}`);
+  out.push("Estimates come from single-item measurements and are not additive; apply reports the verified total.");
+  return out.join("\n");
+}
+
+// src/resolve.ts
+function knownIds(m, scopes, applied) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const id of Object.keys(m?.items ?? {})) if (!id.startsWith("memory:")) ids.add(id);
+  for (const t of m?.upfrontTools ?? []) ids.add(`tool:${t}`);
+  const trims = activeTrims(scopes);
+  for (const t of trims.tools) ids.add(`tool:${t.name}`);
+  for (const p of trims.plugins) ids.add(`plugin:${p.id}`);
+  for (const s of trims.skills) ids.add(`skill:${s.name}`);
+  for (const t of applied.owned.deny) ids.add(`tool:${t}`);
+  for (const p of Object.keys(applied.owned.plugins)) ids.add(`plugin:${p}`);
+  for (const s of Object.keys(applied.owned.skills)) ids.add(`skill:${s}`);
+  return [...ids];
+}
+function resolveItem(query, ids) {
+  const q = query.trim();
+  const ql = q.toLowerCase().replace(/^anthropic-skills:/, "");
+  const exact = ids.find((id) => id === q);
+  if (exact) return { id: exact, candidates: [exact] };
+  const ci = ids.filter((id) => id.toLowerCase() === ql);
+  if (ci.length === 1) return { id: ci[0], candidates: ci };
+  const byName = ids.filter((id) => {
+    const name = id.slice(id.indexOf(":") + 1).toLowerCase();
+    return name === ql || name.split("@")[0] === ql;
+  });
+  if (byName.length === 1) return { id: byName[0], candidates: byName };
+  if (byName.length > 1) {
+    return { candidates: byName };
+  }
+  const partial = ids.filter((id) => id.toLowerCase().includes(ql));
+  if (partial.length === 1) return { id: partial[0], candidates: partial };
+  return { candidates: partial.slice(0, 12) };
+}
+
+// src/commands.ts
+var DEFAULT_GROUPS = ["tools", "plugins", "skills"];
+function refsForPlan(plan, groups) {
+  const refs = [];
+  for (const i of plan.items) {
+    if (!i.group || !groups.includes(i.group) || i.action !== "off" && i.action !== "soft") continue;
+    const name = i.id.slice(i.id.indexOf(":") + 1);
+    if (i.kind === "tool" && i.action === "off") refs.push({ kind: "tool", name });
+    else if (i.kind === "plugin" && i.action === "off") refs.push({ kind: "plugin", id: name });
+    else if (i.kind === "skill") refs.push({ kind: "skill", name, level: i.action === "off" ? "off" : "name-only" });
+  }
+  return refs;
+}
+function gitIgnoreStatus(root) {
+  try {
+    const r = spawnSync2("git", ["-C", root, "check-ignore", "-q", path10.join(".claude", "settings.local.json")], {
+      shell: false,
+      windowsHide: true,
+      stdio: "ignore",
+      timeout: 1e4
+    });
+    return r.status === 0 ? "ignored" : r.status === 1 ? "not-ignored" : "no-repo";
+  } catch {
+    return "no-repo";
+  }
+}
+function addGitExclude(root) {
+  const r = spawnSync2("git", ["-C", root, "rev-parse", "--git-path", "info/exclude"], { shell: false, encoding: "utf8", windowsHide: true });
+  if (r.status !== 0) return false;
+  const file = path10.resolve(root, r.stdout.trim());
+  fs9.mkdirSync(path10.dirname(file), { recursive: true });
+  const cur = fs9.existsSync(file) ? fs9.readFileSync(file, "utf8") : "";
+  if (!cur.split(/\r?\n/).includes(".claude/settings.local.json")) {
+    fs9.appendFileSync(file, `${cur && !cur.endsWith("\n") ? "\n" : ""}.claude/settings.local.json
+`);
+  }
+  return true;
+}
+async function apply(root, opts, out) {
+  const plan = opts.planFile ? readJson(path10.resolve(opts.planFile)) : loadPlan(root);
+  if (!plan) {
+    out("No plan yet. Run: ctx plan");
+    return 2;
+  }
+  const m = loadMeasurement(root);
+  if (!m) {
+    out("No measurement yet. Run: ctx measure");
+    return 2;
+  }
+  const groups = opts.groups ?? DEFAULT_GROUPS;
+  const desired = refsForPlan(plan, groups);
+  const desiredKeys = new Set(desired.map(refKey));
+  const mutation = (s, a) => {
+    const changes = [];
+    const pinned = new Set(a.pinnedOff ?? []);
+    for (const r of ownedRefs(a)) {
+      if (desiredKeys.has(refKey(r)) || pinned.has(refKey(r))) continue;
+      if (clearEntry(s, a, r) === "removed") changes.push(`removed ${describeRef(r)} (no longer planned)`);
+    }
+    for (const r of desired) {
+      const c = setEntry(s, a, r);
+      if (c) changes.push(c);
+    }
+    return changes;
+  };
+  if (!opts.yes) {
+    const settings = readJson(path10.join(root, ".claude", "settings.local.json")) ?? {};
+    const changes = mutation(JSON.parse(JSON.stringify(settings)), JSON.parse(JSON.stringify(loadApplied(root))));
+    out(`Dry run (groups: ${groups.join(", ")}). ${changes.length} change(s) to .claude/settings.local.json:`);
+    for (const c of changes) out(`  ${c}`);
+    out("Run again with --yes to write them.");
+    return 0;
+  }
+  const res = writeSettings(root, `apply ${groups.join(",")}`, mutation);
+  const skipped = res.changes.filter((c) => c.startsWith("skipped"));
+  const applied = res.changes.filter((c) => !c.startsWith("skipped"));
+  out(applied.length ? `Wrote ${applied.length} change(s) to ${res.file} (backup ${res.backup}).` : "Settings already match the plan; nothing written.");
+  for (const c of res.changes) out(`  ${c}`);
+  if (skipped.length) out("Skipped entries hold a value you set yourself; ctx leaves them alone.");
+  const git = gitIgnoreStatus(root);
+  if (git === "not-ignored") {
+    if (opts.gitExclude && addGitExclude(root)) out("Added .claude/settings.local.json to .git/info/exclude.");
+    else out("Warning: .claude/settings.local.json is not git-ignored. Re-run with --git-exclude to add it to .git/info/exclude.");
+  }
+  if (opts.verify !== false) await verifyAndRecord(root, m, out);
+  return 0;
+}
+async function verifyAndRecord(root, m, out) {
+  const before = m.current.correctedTokens;
+  try {
+    const now = await verifyRun(root, {}, m.reference, m.skillsQuirk);
+    const a = loadApplied(root);
+    a.verified = { at: (/* @__PURE__ */ new Date()).toISOString(), beforeTokens: before, afterTokens: now.correctedTokens, rawAfterTokens: now.totalTokens };
+    writeJson(appliedPath(root), a);
+    const fresh = loadMeasurement(root);
+    if (fresh) {
+      fresh.current = now;
+      writeJson(measurementPath(root), fresh);
+    }
+    out(`Upfront context for new sessions: ${fmtK(before)} -> ${fmtK(now.correctedTokens)} (untrimmed ${fmtK(m.reference.correctedTokens)})` + (m.skillsQuirk && now.totalTokens !== now.correctedTokens ? `; /context will show ${fmtK(now.totalTokens)}` : "") + ".");
+    out("Start a new session (/clear or a new chat) to use it. This session keeps the tools it started with.");
+  } catch (e) {
+    out(`Verification run failed: ${e.message}. Settings were written; run ctx measure to check.`);
+  }
+}
+function refForId(id, level = "name-only") {
+  const name = id.slice(id.indexOf(":") + 1);
+  if (id.startsWith("tool:")) return { kind: "tool", name };
+  if (id.startsWith("plugin:")) return { kind: "plugin", id: name };
+  if (id.startsWith("skill:")) return { kind: "skill", name, level };
+  return void 0;
+}
+function resolveOrExplain(root, query, out) {
+  const m = loadMeasurement(root);
+  const ids = knownIds(m, loadScopes(root), loadApplied(root));
+  const r = resolveItem(query, ids);
+  if (r.id) return r.id;
+  if (r.candidates.length) {
+    out(`"${query}" matches several items; use one of:`);
+    for (const c of r.candidates) out(`  ${c}`);
+  } else {
+    out(`No item named "${query}". Known items include: ${ids.filter((i) => !i.startsWith("mcp:")).slice(0, 12).join(", ")} ...`);
+  }
+  return void 0;
+}
+function recordReenable(root, id, reason) {
+  const l = loadLedger(root);
+  if (!l) return;
+  (l.reenables[id] ??= []).push((/* @__PURE__ */ new Date()).toISOString() + (reason ? ` ${reason.slice(0, 120)}` : ""));
+  l.reenables[id] = l.reenables[id].slice(-10);
+  writeJson(ledgerPath(root), l);
+}
+function howItApplies(id, m) {
+  const name = id.slice(id.indexOf(":") + 1);
+  if (id.startsWith("tool:")) {
+    const lines = [
+      `${name} can be called from now on, but it stays out of this session's tool list until /clear or a new session.`
+    ];
+    const schema = m?.toolSchemas?.[name];
+    if (schema) {
+      const s = JSON.stringify(schema);
+      lines.push(`${name} input schema (call the tool with arguments matching it):`);
+      lines.push(s.length > 4e3 ? `${s.slice(0, 4e3)}... (truncated)` : s);
+    }
+    return lines;
+  }
+  if (id.startsWith("plugin:")) return ["Run /reload-plugins to load it in this session (new sessions load it automatically)."];
+  if (id.startsWith("skill:")) return [`Skill ${name} can be invoked by name now; its full description returns in new sessions.`];
+  return [];
+}
+function on(root, query, opts, out) {
+  let id = resolveOrExplain(root, query, out);
+  if (!id) return 2;
+  if (id.startsWith("mcp:")) {
+    out(`${id} is an MCP server. Toggle it with /mcp (ctx doesn't edit ~/.claude.json).`);
+    return 0;
+  }
+  const m = loadMeasurement(root);
+  const pluginSkill = id.startsWith("skill:") && m?.skills.find((s) => `skill:${s.name}` === id)?.plugin;
+  if (pluginSkill) {
+    const pid = Object.keys(m?.items ?? {}).find((k) => k.startsWith(`plugin:${pluginSkill}@`));
+    if (pid) {
+      out(`${id} belongs to plugin ${pid.slice(7)}; switching the plugin on.`);
+      id = pid;
+    }
+  }
+  const ref = refForId(id);
+  if (!ref) {
+    out(`Can't switch ${id} on.`);
+    return 2;
+  }
+  let result = "absent";
+  const res = writeSettings(root, `on ${id}`, (s, a) => {
+    const r = clearEntry(s, a, ref, !!opts.force);
+    result = r;
+    if (r === "removed") {
+      a.pinnedOff = (a.pinnedOff ?? []).filter((k) => k !== refKey(ref));
+      return [`removed ${describeRef(ref)}`];
+    }
+    return [];
+  });
+  if (result === "removed") {
+    out(`${id} is on again (${res.file}, backup ${res.backup}).`);
+    for (const l of howItApplies(id, m)) out(l);
+    recordReenable(root, id, opts.reason);
+    return 0;
+  }
+  if (result === "not-owned") {
+    out(`${id} is switched off in .claude/settings.local.json, but not by ctx. Run "ctx on ${query} --force" to remove that entry (a backup is kept).`);
+    return 1;
+  }
+  const scopes = loadScopes(root);
+  const where = ref.kind === "tool" ? findRule(scopes, "deny", ref.name) : ref.kind === "plugin" ? findRule(scopes, "plugin", ref.id) : ref.kind === "skill" ? findRule(scopes, "skill", ref.name) : [];
+  const other = where.filter((s) => s.scope !== "local");
+  if (other.length) {
+    const key = ref.kind === "tool" ? `permissions.deny "${ref.name}"` : ref.kind === "plugin" ? `enabledPlugins["${ref.id}"]` : ref.kind === "skill" ? `skillOverrides["${ref.name}"]` : "";
+    for (const s of other) out(`${id} is switched off in ${s.path} (${s.scope} settings), key ${key}. ctx doesn't edit that file; change it there.`);
+    return 1;
+  }
+  out(`${id} is already on.`);
+  return 0;
+}
+function off(root, query, opts, out) {
+  const id = resolveOrExplain(root, query, out);
+  if (!id) return 2;
+  if (id.startsWith("mcp:")) {
+    out(`${id} is an MCP server. Toggle it with /mcp.`);
+    return 0;
+  }
+  const m = loadMeasurement(root);
+  if (id.startsWith("skill:") && m?.skills.find((s) => `skill:${s.name}` === id)?.plugin) {
+    out(`${id} is a plugin skill; plugin skills can't be switched off one by one. Switch off its plugin instead.`);
+    return 1;
+  }
+  const prot = protectedIds({ ledger: loadLedger(root), keep: loadProfile(root)?.keep });
+  if (prot.has(id) && !opts.force) {
+    out(`${id} is protected${id === "tool:Skill" || id === "tool:ToolSearch" ? " (denying it makes context larger)" : ""}. Use --force to switch it off anyway.`);
+    return 1;
+  }
+  const ref = refForId(id, opts.level ?? "name-only");
+  if (!ref) {
+    out(`Can't switch ${id} off.`);
+    return 2;
+  }
+  const res = writeSettings(root, `off ${id}`, (s, a) => {
+    const c = setEntry(s, a, ref);
+    if (c && !c.startsWith("skipped")) a.pinnedOff = [.../* @__PURE__ */ new Set([...a.pinnedOff ?? [], refKey(ref)])];
+    return c ? [c] : [];
+  });
+  if (!res.changes.length) {
+    out(`${id} is already off.`);
+    return 0;
+  }
+  if (res.changes[0].startsWith("skipped")) {
+    out(res.changes[0]);
+    return 1;
+  }
+  const save = m?.items[id];
+  out(`${describeRef(ref)} written to ${res.file} (backup ${res.backup})${save ? `; saves about ${fmtK(ref.kind === "skill" && ref.level === "name-only" ? save.softDeltaTokens ?? 0 : save.deltaTokens)} per new session` : ""}.`);
+  if (ref.kind === "plugin") out("Takes effect in new sessions, or run /reload-plugins.");
+  else out("Takes effect in new sessions.");
+  return 0;
+}
+function undo2(root, all, out) {
+  try {
+    const r = undo(root, all);
+    out(all ? r.deleted ? "Restored the original state: .claude/settings.local.json did not exist before ctx, so it was removed." : `Restored the original .claude/settings.local.json (backup ${r.restored}).` : `Restored .claude/settings.local.json from backup ${r.restored}${r.deleted ? " (the file did not exist then, so it was removed)" : ""}.`);
+    if (r.manualEditsSaved) out(`The file had edits made after ctx's last write; they were saved to backups/${r.manualEditsSaved}.`);
+    out("New sessions use the restored settings.");
+    return 0;
+  } catch (e) {
+    out(e.message);
+    return 1;
+  }
+}
+
 // src/cli.ts
+var GROUPS = ["tools", "plugins", "skills", "skills-off", "rare"];
+function parseGroups(v) {
+  if (typeof v !== "string") return void 0;
+  const gs = v.split(/[,\s]+/).filter(Boolean);
+  const bad = gs.filter((g) => !GROUPS.includes(g));
+  if (bad.length) throw new Error(`unknown group(s): ${bad.join(", ")} (valid: ${GROUPS.join(", ")})`);
+  return gs;
+}
 var HELP = `ctx: measure and trim what each Claude Code session loads.
 
 Usage: ctx <command> [flags]
@@ -969,8 +1945,21 @@ Usage: ctx <command> [flags]
   usage [--sessions N] [--json]             build the usage ledger from this project's transcripts
   report [--json]                           breakdown, what's off, usage, suggestions
   doctor                                    diagnose binary, settings, transcripts, cache
-Global: --project <dir> (default: CLAUDE_PROJECT_DIR or cwd)
-Coming in M2+: plan, apply, on, off, undo, hook, global`;
+  profile [--set '<json>']                  show or update the project description (summary, stack,
+                                            services, workTypes, keep)
+  plan [--aggressive] [--min-tokens N] [--json] [--set '<json>']
+                                            propose a lean profile; --set applies Claude's review
+                                            (it may only make the plan more conservative)
+  apply [--groups g1,g2] [--yes] [--plan <file>] [--no-verify] [--git-exclude]
+                                            write the plan to .claude/settings.local.json
+                                            (groups: tools, plugins, skills, skills-off, rare;
+                                            default: tools,plugins,skills; dry run without --yes)
+  on <item> [--force] [--reason "<task>"]   switch one item back on
+  off <item> [--level name-only|off] [--force]   switch one item off
+  undo [all]                                restore the previous backup, or the original file
+  verify                                    one /context run of the current settings
+Items: tool:Artifact, plugin:cloudflare@cloudflare, skill:docx, or just a name ("artifact").
+Global: --project <dir> (default: CLAUDE_PROJECT_DIR or cwd)`;
 async function main(argv) {
   const a = parseArgs(argv);
   const root = resolveProjectRoot(typeof a.flags.project === "string" ? a.flags.project : void 0);
@@ -1018,6 +2007,78 @@ async function main(argv) {
         return 0;
       }
       console.log(renderReport(root, m, l));
+      return 0;
+    }
+    case "profile": {
+      if (typeof a.flags.set === "string") {
+        const p2 = setProfile(root, a.flags.set);
+        console.log(JSON.stringify(p2, null, 2));
+        return 0;
+      }
+      const p = loadProfile(root);
+      console.log(p ? JSON.stringify(p, null, 2) : `No project profile yet. Set one with: ctx profile --set '{"summary":"...","services":[],"workTypes":["code"]}'`);
+      return 0;
+    }
+    case "plan": {
+      let m = loadMeasurement(root);
+      if (!m) {
+        log("No measurement yet; measuring now...");
+        m = await measure(root, { log });
+      }
+      if (typeof a.flags.set === "string") {
+        const draft = loadPlan(root);
+        if (!draft) {
+          console.error("No plan to review. Run: ctx plan");
+          return 2;
+        }
+        const r = reviewPlan(draft, a.flags.set);
+        savePlan(root, r.plan);
+        for (const c of r.changed) console.log(`changed  ${c}`);
+        for (const c of r.rejected) console.log(`rejected ${c}`);
+        console.log(renderPlan(r.plan, m));
+        return r.rejected.length ? 1 : 0;
+      }
+      const l = loadLedger(root) ?? await buildLedger(root);
+      const profile = loadProfile(root);
+      const minTokens = typeof a.flags["min-tokens"] === "string" ? parseInt(a.flags["min-tokens"], 10) : void 0;
+      const plan = buildPlan(m, l, profile, {
+        aggressive: !!a.flags.aggressive,
+        minTokens: minTokens && minTokens > 0 ? minTokens : void 0,
+        protectedIds: protectedIds({ ledger: l, keep: profile?.keep })
+      });
+      savePlan(root, plan);
+      console.log(a.flags.json ? JSON.stringify(plan, null, 2) : renderPlan(plan, m));
+      return 0;
+    }
+    case "apply":
+      return apply(root, {
+        groups: parseGroups(a.flags.groups),
+        yes: !!a.flags.yes,
+        planFile: typeof a.flags.plan === "string" ? a.flags.plan : void 0,
+        verify: !a.flags["no-verify"],
+        gitExclude: !!a.flags["git-exclude"]
+      }, (s) => console.log(s));
+    case "on":
+    case "off": {
+      const q = a.positional.join(" ").trim();
+      if (!q) {
+        console.error(`Usage: ctx ${a.cmd} <item>`);
+        return 2;
+      }
+      const out = (s) => console.log(s);
+      if (a.cmd === "on") return on(root, q, { force: !!a.flags.force, reason: typeof a.flags.reason === "string" ? a.flags.reason : void 0 }, out);
+      const level = a.flags.level === "off" ? "off" : "name-only";
+      return off(root, q, { force: !!a.flags.force, level }, out);
+    }
+    case "undo":
+      return undo2(root, a.positional[0] === "all", (s) => console.log(s));
+    case "verify": {
+      const m = loadMeasurement(root);
+      if (!m) {
+        console.error("No measurement yet. Run: ctx measure");
+        return 2;
+      }
+      await verifyAndRecord(root, m, (s) => console.log(s));
       return 0;
     }
     case "doctor":
