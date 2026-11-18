@@ -2,10 +2,10 @@
 name: setup
 description: Set up a lean context profile for this project - describe, measure, plan, confirm, apply.
 disable-model-invocation: true
-allowed-tools: Bash(node:*), Read, Glob
+allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/ctx":*), Read, Glob
 argument-hint: "[aggressive]"
 ---
-Run the ctx onboarding for this project. The CLI is `node "${CLAUDE_PLUGIN_ROOT}/dist/ctx.mjs"` (called CTX below).
+Run the ctx onboarding for this project. The CLI is `"${CLAUDE_PLUGIN_ROOT}/bin/ctx"` (called CTX below).
 Run every command from the project root. Show CLI output to the user as printed, in code blocks. Never edit settings
 files yourself; only the CLI writes them.
 

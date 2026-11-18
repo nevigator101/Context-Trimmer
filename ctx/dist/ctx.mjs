@@ -173,10 +173,23 @@ function findClaude() {
   return cached = null;
 }
 
+// src/self.ts
+import path3 from "node:path";
+function isStandalone(argv = process.argv, execPath = process.execPath) {
+  const script = argv[1];
+  return !script || !/\.[cm]?js$/i.test(script) || path3.resolve(script) === path3.resolve(execPath);
+}
+function selfCommand(argv = process.argv, execPath = process.execPath) {
+  return isStandalone(argv, execPath) ? { cmd: execPath, args: [] } : { cmd: execPath, args: [argv[1]] };
+}
+function runtimeLabel() {
+  return isStandalone() ? `standalone build (node ${process.version}) at ${process.execPath}` : `node ${process.version}`;
+}
+
 // src/measure.ts
 import { createHash as createHash2 } from "node:crypto";
 import fs5 from "node:fs";
-import path5 from "node:path";
+import path6 from "node:path";
 
 // src/tokens.ts
 function parseTokens(raw) {
@@ -281,10 +294,10 @@ function pluginOfSource(source) {
 
 // src/registry.ts
 import fs3 from "node:fs";
-import path3 from "node:path";
+import path4 from "node:path";
 import readline from "node:readline";
 function registryPath() {
-  return path3.join(ctxHome(), "registry.json");
+  return path4.join(ctxHome(), "registry.json");
 }
 function loadRegistry() {
   const r = readJson(registryPath());
@@ -296,7 +309,7 @@ function registerProject(root) {
     const key = projectKey(root);
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const cur = reg.projects[key];
-    reg.projects[key] = { root: path3.resolve(root), firstSeen: cur?.firstSeen ?? now, lastSeen: now };
+    reg.projects[key] = { root: path4.resolve(root), firstSeen: cur?.firstSeen ?? now, lastSeen: now };
     writeJson(registryPath(), reg);
   } catch {
   }
@@ -322,7 +335,7 @@ async function cwdOf(file) {
   return void 0;
 }
 async function discoverProjects() {
-  const base = path3.join(claudeDir(), "projects");
+  const base = path4.join(claudeDir(), "projects");
   const reg = loadRegistry();
   const bySlug = /* @__PURE__ */ new Map();
   let entries = [];
@@ -332,14 +345,14 @@ async function discoverProjects() {
   }
   for (const d of entries) {
     if (!d.isDirectory()) continue;
-    const dir = path3.join(base, d.name);
+    const dir = path4.join(base, d.name);
     const slot = bySlug.get(d.name.toLowerCase()) ?? { dirs: [], files: [] };
     slot.dirs.push(dir);
     try {
       for (const f of fs3.readdirSync(dir)) {
         if (!f.endsWith(".jsonl")) continue;
         try {
-          slot.files.push({ file: path3.join(dir, f), mtime: fs3.statSync(path3.join(dir, f)).mtimeMs });
+          slot.files.push({ file: path4.join(dir, f), mtime: fs3.statSync(path4.join(dir, f)).mtimeMs });
         } catch {
         }
       }
@@ -367,7 +380,7 @@ async function discoverProjects() {
     const key = projectKey(root);
     out.set(key, {
       key,
-      root: path3.resolve(root),
+      root: path4.resolve(root),
       dirs: slot.dirs,
       lastActive: new Date(slot.files[0].mtime).toISOString(),
       sessions: slot.files.length,
@@ -536,14 +549,14 @@ function firstSentence(text, max = 80) {
 
 // src/settings.ts
 import fs4 from "node:fs";
-import path4 from "node:path";
+import path5 from "node:path";
 function managedSettingsPath() {
   if (process.platform === "win32") return "C:\\Program Files\\ClaudeCode\\managed-settings.json";
   if (process.platform === "darwin") return "/Library/Application Support/ClaudeCode/managed-settings.json";
   return "/etc/claude-code/managed-settings.json";
 }
 function localSettingsPath(root) {
-  return path4.join(root, ".claude", "settings.local.json");
+  return path5.join(root, ".claude", "settings.local.json");
 }
 function load(scope, file) {
   if (!fs4.existsSync(file)) return { scope, path: file, exists: false };
@@ -557,8 +570,8 @@ function load(scope, file) {
 }
 function loadScopes(root) {
   return [
-    load("user", path4.join(claudeDir(), "settings.json")),
-    load("project", path4.join(root, ".claude", "settings.json")),
+    load("user", path5.join(claudeDir(), "settings.json")),
+    load("project", path5.join(root, ".claude", "settings.json")),
     load("local", localSettingsPath(root)),
     load("managed", managedSettingsPath())
   ];
@@ -601,10 +614,10 @@ function effectivePlugins(scopes, opts = {}) {
 }
 function installedPlugins(root) {
   const j = readJson(
-    path4.join(claudeDir(), "plugins", "installed_plugins.json")
+    path5.join(claudeDir(), "plugins", "installed_plugins.json")
   );
   const out = [];
-  const norm = (p) => path4.resolve(p).toLowerCase();
+  const norm = (p) => path5.resolve(p).toLowerCase();
   for (const [id, installs] of Object.entries(j?.plugins ?? {})) {
     if (installs.some((i) => i.scope === "user" || i.projectPath && norm(i.projectPath) === norm(root))) out.push(id);
   }
@@ -612,13 +625,13 @@ function installedPlugins(root) {
 }
 function pluginDescriptions() {
   const j = readJson(
-    path4.join(claudeDir(), "plugins", "installed_plugins.json")
+    path5.join(claudeDir(), "plugins", "installed_plugins.json")
   );
   const out = {};
   for (const [id, installs] of Object.entries(j?.plugins ?? {})) {
     for (const i of installs) {
       if (!i.installPath) continue;
-      const pj = readJson(path4.join(i.installPath, ".claude-plugin", "plugin.json"));
+      const pj = readJson(path5.join(i.installPath, ".claude-plugin", "plugin.json"));
       if (pj?.description) {
         out[id] = pj.description;
         break;
@@ -657,7 +670,7 @@ var SEED_TOOLS = [
 ];
 var NEVER_TOGGLE = /* @__PURE__ */ new Set(["Skill", "ToolSearch", "EndConversation", "DeferredToolPlaceholder"]);
 function measurementPath(root) {
-  return path5.join(projectStateDir(root), "measurement.json");
+  return path6.join(projectStateDir(root), "measurement.json");
 }
 function loadMeasurement(root) {
   return readJson(measurementPath(root));
@@ -668,9 +681,9 @@ function fingerprint(root, scopes, ccVersion) {
   h.update(`local:${local?.exists ? JSON.stringify(stripTrimKeys(local.data)) : "absent"}`);
   const files = [
     ...scopes.filter((s) => s.scope !== "local").map((s) => s.path),
-    path5.join(root, ".mcp.json"),
-    path5.join(root, "CLAUDE.md"),
-    path5.join(root, ".claude", "CLAUDE.md")
+    path6.join(root, ".mcp.json"),
+    path6.join(root, "CLAUDE.md"),
+    path6.join(root, ".claude", "CLAUDE.md")
   ];
   for (const f of files) {
     try {
@@ -859,7 +872,7 @@ async function verifyRun(root, settings, reference, quirk) {
 
 // src/usage.ts
 import fs6 from "node:fs";
-import path6 from "node:path";
+import path7 from "node:path";
 import readline2 from "node:readline";
 function normalizeSkillName(name) {
   return name.replace(/^anthropic-skills:/, "");
@@ -918,7 +931,7 @@ async function scanLedger(root, opts = {}) {
   for (const dir of opts.dirs ?? transcriptDirs(root)) {
     for (const f of fs6.readdirSync(dir)) {
       if (!f.endsWith(".jsonl")) continue;
-      const full = path6.join(dir, f);
+      const full = path7.join(dir, f);
       try {
         files.push({ file: full, id: f.slice(0, -6), mtime: fs6.statSync(full).mtimeMs, dir });
       } catch {
@@ -943,9 +956,9 @@ async function scanLedger(root, opts = {}) {
     const scan = { calls: /* @__PURE__ */ new Map(), assistantTurns: 0 };
     await scanFile(f.file, scan);
     if (scan.assistantTurns === 0) continue;
-    const subDir = path6.join(f.dir, f.id, "subagents");
+    const subDir = path7.join(f.dir, f.id, "subagents");
     try {
-      for (const s of fs6.readdirSync(subDir)) if (s.endsWith(".jsonl")) await scanFile(path6.join(subDir, s), scan);
+      for (const s of fs6.readdirSync(subDir)) if (s.endsWith(".jsonl")) await scanFile(path7.join(subDir, s), scan);
     } catch {
     }
     let calls = 0;
@@ -965,7 +978,7 @@ function readGlobalCounters() {
   return { skillUsage: j?.skillUsage ?? {}, pluginUsage: j?.pluginUsage ?? {} };
 }
 function ledgerPath(root) {
-  return path6.join(projectStateDir(root), "ledger.json");
+  return path7.join(projectStateDir(root), "ledger.json");
 }
 function loadLedger(root) {
   return readJson(ledgerPath(root));
@@ -978,7 +991,7 @@ function globalSkillCount(l, skill) {
 // src/writer.ts
 import { createHash as createHash3 } from "node:crypto";
 import fs7 from "node:fs";
-import path7 from "node:path";
+import path8 from "node:path";
 var emptyEntries = () => ({ deny: [], plugins: {}, skills: {}, mcpjson: [], allow: [] });
 function emptyApplied(file) {
   return { version: 1, file, owned: emptyEntries(), preexisting: emptyEntries(), history: [] };
@@ -988,14 +1001,14 @@ function projectTarget(root) {
   return { file: localSettingsPath(root), stateDir: projectStateDir(root) };
 }
 function globalTarget() {
-  return { file: path7.join(claudeDir(), "settings.json"), stateDir: path7.join(ctxHome(), "global") };
+  return { file: path8.join(claudeDir(), "settings.json"), stateDir: path8.join(ctxHome(), "global") };
 }
 var T = (w) => typeof w === "string" ? projectTarget(w) : w;
 function appliedPath(w) {
-  return path7.join(T(w).stateDir, "applied.json");
+  return path8.join(T(w).stateDir, "applied.json");
 }
 function backupDir(w) {
-  return path7.join(T(w).stateDir, "backups");
+  return path8.join(T(w).stateDir, "backups");
 }
 function loadApplied(w) {
   const a = readJson(appliedPath(w)) ?? emptyApplied(T(w).file);
@@ -1023,7 +1036,7 @@ function serialize(obj, style) {
   return style.finalNewline ? s + style.eol : s;
 }
 function atomicWrite(file, data, ops = realOps) {
-  fs7.mkdirSync(path7.dirname(file), { recursive: true });
+  fs7.mkdirSync(path8.dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
   const fd = fs7.openSync(tmp, "w");
   try {
@@ -1051,7 +1064,7 @@ function atomicWrite(file, data, ops = realOps) {
 function newBackupId(dir) {
   let id = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
   let n = 0;
-  while (fs7.existsSync(path7.join(dir, `${id}.state.json`))) id = `${id.replace(/_\d+$/, "")}_${++n}`;
+  while (fs7.existsSync(path8.join(dir, `${id}.state.json`))) id = `${id.replace(/_\d+$/, "")}_${++n}`;
   return id;
 }
 function backup(w) {
@@ -1060,9 +1073,9 @@ function backup(w) {
   const id = newBackupId(dir);
   const file = T(w).file;
   const exists = fs7.existsSync(file);
-  if (exists) fs7.copyFileSync(file, path7.join(dir, `${id}.settings.local.json`));
+  if (exists) fs7.copyFileSync(file, path8.join(dir, `${id}.settings.local.json`));
   const applied = readJson(appliedPath(w));
-  fs7.writeFileSync(path7.join(dir, `${id}.state.json`), JSON.stringify({ settingsExisted: exists, applied: applied ?? null }));
+  fs7.writeFileSync(path8.join(dir, `${id}.state.json`), JSON.stringify({ settingsExisted: exists, applied: applied ?? null }));
   return id;
 }
 function listBackups(w) {
@@ -1079,16 +1092,16 @@ function pruneBackups(w, keep) {
 function removeBackup(w, id) {
   for (const suffix of [".settings.local.json", ".state.json"]) {
     try {
-      fs7.unlinkSync(path7.join(backupDir(w), id + suffix));
+      fs7.unlinkSync(path8.join(backupDir(w), id + suffix));
     } catch {
     }
   }
 }
 function restoreBackup(w, id, ops = realOps) {
   const dir = backupDir(w);
-  const st = JSON.parse(fs7.readFileSync(path7.join(dir, `${id}.state.json`), "utf8"));
+  const st = JSON.parse(fs7.readFileSync(path8.join(dir, `${id}.state.json`), "utf8"));
   const file = T(w).file;
-  if (st.settingsExisted) atomicWrite(file, fs7.readFileSync(path7.join(dir, `${id}.settings.local.json`)), ops);
+  if (st.settingsExisted) atomicWrite(file, fs7.readFileSync(path8.join(dir, `${id}.settings.local.json`)), ops);
   else if (fs7.existsSync(file)) fs7.unlinkSync(file);
   if (st.applied) writeJson(appliedPath(w), st.applied);
   else try {
@@ -1100,7 +1113,7 @@ function earlierBytes(w, settings) {
   const want = JSON.stringify(settings);
   for (const id of listBackups(w).reverse()) {
     try {
-      const text = fs7.readFileSync(path7.join(backupDir(w), `${id}.settings.local.json`), "utf8");
+      const text = fs7.readFileSync(path8.join(backupDir(w), `${id}.settings.local.json`), "utf8");
       if (JSON.stringify(JSON.parse(text)) === want) return text;
     } catch {
     }
@@ -1109,7 +1122,7 @@ function earlierBytes(w, settings) {
 }
 function originallyAbsent(w, originalBackup) {
   if (!originalBackup) return false;
-  const st = readJson(path7.join(backupDir(w), `${originalBackup}.state.json`));
+  const st = readJson(path8.join(backupDir(w), `${originalBackup}.state.json`));
   return st?.settingsExisted === false;
 }
 function writeSettings(w, action, mutate, ops = realOps) {
@@ -1173,10 +1186,10 @@ function undo(w, all = false, ops = realOps) {
     const dir = backupDir(w);
     manual = `${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.pre-undo.settings.local.json`;
     const file2 = T(w).file;
-    if (fs7.existsSync(file2)) fs7.copyFileSync(file2, path7.join(dir, manual));
+    if (fs7.existsSync(file2)) fs7.copyFileSync(file2, path8.join(dir, manual));
   }
   restoreBackup(w, target, ops);
-  const st = JSON.parse(fs7.readFileSync(path7.join(backupDir(w), `${target}.state.json`), "utf8"));
+  const st = JSON.parse(fs7.readFileSync(path8.join(backupDir(w), `${target}.state.json`), "utf8"));
   const original = applied.originalBackup;
   for (const b of backups.filter((b2) => b2 >= target)) if (b !== original) removeBackup(w, b);
   const after = loadApplied(w);
@@ -1435,7 +1448,7 @@ function age(iso) {
 function renderDoctor(root) {
   const out = [];
   out.push(`ctx doctor: ${projectKey(root)}`);
-  out.push(`  node ${process.version} on ${process.platform}`);
+  out.push(`  runtime: ${runtimeLabel()} on ${process.platform}-${process.arch}`);
   const bin = findClaude();
   if (bin) out.push(`  claude binary: ${bin.path}  (v${bin.version}, via ${bin.source})`);
   else {
@@ -1475,16 +1488,16 @@ function renderDoctor(root) {
 
 // src/protect.ts
 import fs9 from "node:fs";
-import path8 from "node:path";
+import path9 from "node:path";
 var ALWAYS = ["Read", "Edit", "Write", "Glob", "Grep", "Skill", "ToolSearch", "AskUserQuestion", "EndConversation"];
 function claudeMdMentions(word) {
-  for (const f of [path8.join(claudeDir(), "CLAUDE.md")]) {
+  for (const f of [path9.join(claudeDir(), "CLAUDE.md")]) {
     try {
       const text = fs9.readFileSync(f, "utf8");
       if (text.includes(word)) return true;
       for (const m of text.matchAll(/^@(\S+)/gm)) {
         try {
-          if (fs9.readFileSync(path8.resolve(path8.dirname(f), m[1]), "utf8").includes(word)) return true;
+          if (fs9.readFileSync(path9.resolve(path9.dirname(f), m[1]), "utf8").includes(word)) return true;
         } catch {
         }
       }
@@ -1508,6 +1521,9 @@ function protectedIds(opts = {}) {
 
 // src/report.ts
 var WIDTH = 100;
+function fitPath(s, n) {
+  return s.length <= n ? s.padEnd(n) : `\u2026${s.slice(s.length - n + 1)}`;
+}
 function wrapJoin(prefix, parts, indent = prefix.length) {
   const lines = [];
   let cur = prefix;
@@ -1615,10 +1631,10 @@ function renderReport(root, m, ledger) {
 // src/commands.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
 import fs10 from "node:fs";
-import path11 from "node:path";
+import path12 from "node:path";
 
 // src/plan.ts
-import path10 from "node:path";
+import path11 from "node:path";
 
 // src/deps.json
 var deps_default = {
@@ -1629,9 +1645,9 @@ var deps_default = {
 };
 
 // src/profile.ts
-import path9 from "node:path";
+import path10 from "node:path";
 function profilePath(root) {
-  return path9.join(projectStateDir(root), "project-profile.json");
+  return path10.join(projectStateDir(root), "project-profile.json");
 }
 function loadProfile(root) {
   return readJson(profilePath(root));
@@ -1677,7 +1693,7 @@ function profileKeywords(p) {
 // src/plan.ts
 var DEPS = deps_default;
 function planPath(root) {
-  return path10.join(projectStateDir(root), "plan.json");
+  return path11.join(projectStateDir(root), "plan.json");
 }
 function loadPlan(root) {
   return readJson(planPath(root));
@@ -1963,7 +1979,7 @@ function refsForPlan(plan, groups) {
 }
 function gitIgnoreStatus(root) {
   try {
-    const r = spawnSync2("git", ["-C", root, "check-ignore", "-q", path11.join(".claude", "settings.local.json")], {
+    const r = spawnSync2("git", ["-C", root, "check-ignore", "-q", path12.join(".claude", "settings.local.json")], {
       shell: false,
       windowsHide: true,
       stdio: "ignore",
@@ -1977,8 +1993,8 @@ function gitIgnoreStatus(root) {
 function addGitExclude(root) {
   const r = spawnSync2("git", ["-C", root, "rev-parse", "--git-path", "info/exclude"], { shell: false, encoding: "utf8", windowsHide: true });
   if (r.status !== 0) return false;
-  const file = path11.resolve(root, r.stdout.trim());
-  fs10.mkdirSync(path11.dirname(file), { recursive: true });
+  const file = path12.resolve(root, r.stdout.trim());
+  fs10.mkdirSync(path12.dirname(file), { recursive: true });
   const cur = fs10.existsSync(file) ? fs10.readFileSync(file, "utf8") : "";
   if (!cur.split(/\r?\n/).includes(".claude/settings.local.json")) {
     fs10.appendFileSync(file, `${cur && !cur.endsWith("\n") ? "\n" : ""}.claude/settings.local.json
@@ -1998,7 +2014,7 @@ function allowEnable(root, remove, out) {
   return 0;
 }
 async function apply(root, opts, out) {
-  const plan = opts.planFile ? readJson(path11.resolve(opts.planFile)) : loadPlan(root);
+  const plan = opts.planFile ? readJson(path12.resolve(opts.planFile)) : loadPlan(root);
   if (!plan) {
     out("No plan yet. Run: ctx plan");
     return 2;
@@ -2029,7 +2045,7 @@ async function apply(root, opts, out) {
     return changes;
   };
   if (!opts.yes) {
-    const settings = readJson(path11.join(root, ".claude", "settings.local.json")) ?? {};
+    const settings = readJson(path12.join(root, ".claude", "settings.local.json")) ?? {};
     const changes = mutation(JSON.parse(JSON.stringify(settings)), JSON.parse(JSON.stringify(loadApplied(root))));
     out(`Dry run (groups: ${groups.join(", ")}). ${changes.length} change(s) to .claude/settings.local.json:`);
     for (const c of changes) out(`  ${c}`);
@@ -2262,12 +2278,12 @@ import { spawn as spawn2 } from "node:child_process";
 import fs12 from "node:fs";
 
 // src/global.ts
-import path12 from "node:path";
+import path13 from "node:path";
 var isObj3 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 var nameOf2 = (id) => id.slice(id.indexOf(":") + 1);
 var GLOBAL_SKILL_SOURCES = /* @__PURE__ */ new Set(["Built-in", "claude.ai sync", "User"]);
 function globalPlanPath() {
-  return path12.join(ctxHome(), "global", "plan.json");
+  return path13.join(ctxHome(), "global", "plan.json");
 }
 function loadGlobalPlan() {
   return readJson(globalPlanPath());
@@ -2284,9 +2300,9 @@ function projectUses(l, id, keep = []) {
 }
 function userPlugins() {
   const out = {};
-  const inst = readJson(path12.join(claudeDir(), "plugins", "installed_plugins.json"));
+  const inst = readJson(path13.join(claudeDir(), "plugins", "installed_plugins.json"));
   for (const [id, installs] of Object.entries(inst?.plugins ?? {})) if (installs.some((i) => i.scope === "user")) out[id] = true;
-  const us = readJson(path12.join(claudeDir(), "settings.json"));
+  const us = readJson(path13.join(claudeDir(), "settings.json"));
   if (isObj3(us?.enabledPlugins)) {
     for (const [id, v] of Object.entries(us.enabledPlugins)) if (typeof v === "boolean") out[id] = v;
   }
@@ -2344,7 +2360,7 @@ async function buildGlobalPlan(opts = {}, found) {
   const active = uses.filter((u) => u.active);
   const counters = readGlobalCounters();
   const descs = pluginDescriptions();
-  const userSettings = readJson(path12.join(claudeDir(), "settings.json")) ?? {};
+  const userSettings = readJson(path13.join(claudeDir(), "settings.json")) ?? {};
   const userSkills = isObj3(userSettings.skillOverrides) ? userSettings.skillOverrides : {};
   const items = [];
   for (const id of ids) {
@@ -2409,7 +2425,7 @@ function renderGlobalPlan(plan) {
   const active = plan.projects.filter((p) => p.active);
   out.push(`ctx global: ${active.length} active project${active.length === 1 ? "" : "s"} (session in the last ${plan.activeDays} days), ${plan.windowSessions} sessions each`);
   for (const p of plan.projects) {
-    out.push(`  ${p.key.padEnd(48).slice(0, 48)} ${String(p.sessions).padStart(3)} sessions  last ${p.lastActive?.slice(0, 10) ?? "-"}${p.registered ? "  profiled" : ""}${p.active ? "" : "  (inactive)"}`);
+    out.push(`  ${fitPath(p.key, 48)} ${String(p.sessions).padStart(3)} sessions  last ${p.lastActive?.slice(0, 10) ?? "-"}${p.registered ? "  profiled" : ""}${p.active ? "" : "  (inactive)"}`);
   }
   out.push("");
   const trims = plan.items.filter((i) => i.action !== "none");
@@ -2562,10 +2578,10 @@ function globalOffHere(root) {
 
 // src/triggers.ts
 import fs11 from "node:fs";
-import path13 from "node:path";
+import path14 from "node:path";
 import readline3 from "node:readline";
 function configPath() {
-  return path13.join(ctxHome(), "config.json");
+  return path14.join(ctxHome(), "config.json");
 }
 function loadConfig() {
   return readJson(configPath()) ?? {};
@@ -2574,7 +2590,7 @@ function saveConfig(c) {
   writeJson(configPath(), c);
 }
 function triggersPath() {
-  return path13.join(ctxHome(), "triggers.json");
+  return path14.join(ctxHome(), "triggers.json");
 }
 function loadTriggers() {
   return readJson(triggersPath());
@@ -2592,13 +2608,13 @@ function tokenize(text) {
 }
 function pluginIndex() {
   const out = /* @__PURE__ */ new Map();
-  const inst = readJson(path13.join(claudeDir(), "plugins", "installed_plugins.json"));
+  const inst = readJson(path14.join(claudeDir(), "plugins", "installed_plugins.json"));
   for (const [id, installs] of Object.entries(inst?.plugins ?? {})) {
     const name = id.split("@")[0];
     const skills = /* @__PURE__ */ new Set();
     for (const i of installs) {
       try {
-        for (const d of fs11.readdirSync(path13.join(i.installPath ?? "", "skills"))) skills.add(d.toLowerCase());
+        for (const d of fs11.readdirSync(path14.join(i.installPath ?? "", "skills"))) skills.add(d.toLowerCase());
       } catch {
       }
     }
@@ -2718,7 +2734,7 @@ async function learnTriggers(projects, opts = {}) {
     const files = [];
     for (const d of p.dirs) {
       try {
-        for (const f of fs11.readdirSync(d)) if (f.endsWith(".jsonl")) files.push({ file: path13.join(d, f), mtime: fs11.statSync(path13.join(d, f)).mtimeMs });
+        for (const f of fs11.readdirSync(d)) if (f.endsWith(".jsonl")) files.push({ file: path14.join(d, f), mtime: fs11.statSync(path14.join(d, f)).mtimeMs });
       } catch {
       }
     }
@@ -2843,16 +2859,17 @@ function sessionStart(root) {
   }
   return out;
 }
-function spawnDetached(cliPath, args) {
-  const child = spawn2(process.execPath, [cliPath, ...args], { detached: true, stdio: "ignore", windowsHide: true, shell: false });
+function spawnDetached(args) {
+  const self = selfCommand();
+  const child = spawn2(self.cmd, [...self.args, ...args], { detached: true, stdio: "ignore", windowsHide: true, shell: false });
   child.unref();
 }
 var LEARN_EVERY_MS = 6 * 36e5;
-function sessionEnd(root, cliPath) {
-  if (loadMeasurement(root) || loadLedger(root)) spawnDetached(cliPath, ["usage", "--quiet", "--project", root]);
+function sessionEnd(root) {
+  if (loadMeasurement(root) || loadLedger(root)) spawnDetached(["usage", "--quiet", "--project", root]);
   if (loadConfig().auto) {
     const t = loadTriggers();
-    if (!t || Date.now() - Date.parse(t.learnedAt) > LEARN_EVERY_MS) spawnDetached(cliPath, ["triggers", "learn", "--quiet"]);
+    if (!t || Date.now() - Date.parse(t.learnedAt) > LEARN_EVERY_MS) spawnDetached(["triggers", "learn", "--quiet"]);
   }
 }
 function offCandidates(root) {
@@ -2976,7 +2993,7 @@ async function main(argv) {
           const out = sessionStart(hookRoot);
           if (out.systemMessage || out.hookSpecificOutput) process.stdout.write(JSON.stringify(out));
         } else if (a.positional[0] === "session-end") {
-          sessionEnd(hookRoot, process.argv[1]);
+          sessionEnd(hookRoot);
         } else if (a.positional[0] === "prompt-submit") {
           const out = promptSubmit(hookRoot, input.prompt ?? "");
           if (out.systemMessage || out.hookSpecificOutput) process.stdout.write(JSON.stringify(out));
@@ -3103,7 +3120,7 @@ async function main(argv) {
     case "projects": {
       const ps = await discoverProjects();
       for (const p of ps) {
-        console.log(`${p.key.padEnd(56).slice(0, 56)} ${String(p.sessions).padStart(4)} sessions  last ${p.lastActive?.slice(0, 10) ?? "-".padEnd(10)}${p.registered ? "  profiled" : ""}${p.exists ? "" : "  (folder gone)"}`);
+        console.log(`${fitPath(p.key, 56)} ${String(p.sessions).padStart(4)} sessions  last ${p.lastActive?.slice(0, 10) ?? "-".padEnd(10)}${p.registered ? "  profiled" : ""}${p.exists ? "" : "  (folder gone)"}`);
       }
       return 0;
     }

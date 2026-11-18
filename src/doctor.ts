@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { candidates, findClaude } from './binary.js';
+import { runtimeLabel } from './self.js';
 import { fingerprint, loadMeasurement, measurementPath } from './measure.js';
 import { claudeJsonPath, ctxHome, projectKey, projectStateDir, readJson, transcriptDirs } from './paths.js';
 import { loadScopes } from './settings.js';
@@ -33,7 +34,7 @@ function age(iso: string): string {
 export function renderDoctor(root: string): string {
   const out: string[] = [];
   out.push(`ctx doctor: ${projectKey(root)}`);
-  out.push(`  node ${process.version} on ${process.platform}`);
+  out.push(`  runtime: ${runtimeLabel()} on ${process.platform}-${process.arch}`);
 
   const bin = findClaude();
   if (bin) out.push(`  claude binary: ${bin.path}  (v${bin.version}, via ${bin.source})`);

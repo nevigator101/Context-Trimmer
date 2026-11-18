@@ -5,7 +5,7 @@
 //   - last block is a tool_result                     -> text "ok", end_turn
 //   - user text contains  CALL <Tool> <json-input>     -> tool_use of <Tool> with that input
 //   - a skill body contains  CTXCALL <Tool> <json>     -> same (lets a skill's own text drive the call)
-//   - text naming  node "<...>/dist/ctx.mjs" <sub>   -> Bash tool_use running it (ctx skill bodies)
+//   - text naming  "<...>/bin/ctx" <sub> (or node "<...>/dist/ctx.mjs")  -> Bash tool_use running it (ctx skill bodies)
 //   - anything else                                   -> text "ok", end_turn
 import http from 'node:http';
 
@@ -33,8 +33,11 @@ function decide(body) {
   const m = text.match(/(?:CALL|CTXCALL) (\w+) (\{.*\})/);
   if (m) return { tool: m[1], input: JSON.parse(m[2]) };
   // A ctx skill body: run the command it names, as Claude would.
-  const c = text.match(/node "([^"]+\/dist\/ctx\.mjs)" (\w[\w -]*)/);
-  if (c) return { tool: 'Bash', input: { command: `node "${c[1]}" ${c[2].trim()}`, description: 'Run ctx' } };
+  const c = text.match(/"([^"\n]+\/bin\/ctx)" (\w[\w -]*)/) ?? text.match(/node "([^"]+\/dist\/ctx\.mjs)" (\w[\w -]*)/);
+  if (c) {
+    const command = c[1].endsWith('.mjs') ? `node "${c[1]}" ${c[2].trim()}` : `"${c[1]}" ${c[2].trim()}`;
+    return { tool: 'Bash', input: { command, description: 'Run ctx' } };
+  }
   return { text: 'ok' };
 }
 
@@ -101,7 +104,7 @@ export function inspect(body) {
     for (const b of m.content) {
       if (b.type === 'tool_result') {
         const c = typeof b.content === 'string' ? b.content : (b.content ?? []).map((x) => x.text ?? '').join('');
-        toolResults.push({ is_error: !!b.is_error, content: c.slice(0, 300) });
+        toolResults.push({ is_error: !!b.is_error, content: c.slice(0, 300), text: c });
       }
     }
   }

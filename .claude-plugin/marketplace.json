@@ -1,0 +1,20 @@
+{
+  "name": "ctx",
+  "owner": {
+    "name": "ctx maintainers"
+  },
+  "metadata": {
+    "description": "ctx: measure what each Claude Code session loads, trim what a project doesn't use, and bring it back when needed.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "ctx",
+      "source": "./ctx",
+      "description": "Measure what each Claude Code session loads, trim what this project doesn't use, and bring it back when needed.",
+      "version": "0.1.0",
+      "category": "productivity",
+      "keywords": ["context", "tokens", "skills", "plugins", "settings"]
+    }
+  ]
+}

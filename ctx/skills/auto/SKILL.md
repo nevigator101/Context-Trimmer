@@ -2,13 +2,13 @@
 name: auto
 description: Turn learned triggers on or off - ctx switches a trimmed item back on when a prompt clearly needs it.
 disable-model-invocation: true
-allowed-tools: Bash(node:*)
+allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/ctx":*)
 argument-hint: "on|off|status"
 ---
 Run from the project root and show the output as printed, in a code block:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/dist/ctx.mjs" auto $ARGUMENTS
+"${CLAUDE_PLUGIN_ROOT}/bin/ctx" auto $ARGUMENTS
 ```
 
 With no argument it prints the status: whether auto re-enable is on, and for each item switched off in this project

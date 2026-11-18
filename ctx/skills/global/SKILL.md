@@ -2,10 +2,10 @@
 name: global
 description: Cross-project baseline - switch plugins and skills used in only a few projects off in user settings, and keep them on where they're used.
 disable-model-invocation: true
-allowed-tools: Bash(node:*)
+allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/ctx":*)
 argument-hint: "[undo]"
 ---
-The CLI is `node "${CLAUDE_PLUGIN_ROOT}/dist/ctx.mjs"` (called CTX below). Show CLI output as printed, in code blocks.
+The CLI is `"${CLAUDE_PLUGIN_ROOT}/bin/ctx"` (called CTX below). Show CLI output as printed, in code blocks.
 Never edit settings files yourself; only the CLI writes them.
 
 If the arguments say "undo" ($ARGUMENTS): run `CTX global undo`, show the output, and stop.

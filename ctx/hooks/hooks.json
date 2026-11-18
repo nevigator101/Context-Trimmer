@@ -3,17 +3,17 @@
     "SessionStart": [
       {
         "matcher": "startup|resume|clear",
-        "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/ctx.mjs\" hook session-start", "timeout": 10 } ]
+        "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ctx\" hook session-start", "timeout": 10 } ]
       }
     ],
     "UserPromptSubmit": [
       {
-        "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/ctx.mjs\" hook prompt-submit", "timeout": 10 } ]
+        "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ctx\" hook prompt-submit", "timeout": 10 } ]
       }
     ],
     "SessionEnd": [
       {
-        "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/ctx.mjs\" hook session-end", "timeout": 10 } ]
+        "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ctx\" hook session-end", "timeout": 10 } ]
       }
     ]
   }

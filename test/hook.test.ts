@@ -29,6 +29,9 @@ function measurement(current: number): Measurement {
   };
 }
 
+/** S5 budget (spec: 300 ms). Shared CI runners can set CTX_LATENCY_BUDGET_MS higher; regressions still show. */
+const LATENCY_BUDGET_MS = Number(process.env.CTX_LATENCY_BUDGET_MS ?? 300);
+
 const local = (data: Record<string, unknown>): SettingsFile[] => [{ scope: 'local', path: 'l', exists: true, data }];
 
 describe('capability index', () => {
@@ -111,7 +114,7 @@ describe('sessionStart', () => {
       stdout = r.stdout;
     }
     expect(JSON.parse(stdout).hookSpecificOutput.hookEventName).toBe('SessionStart');
-    expect(Math.min(...times)).toBeLessThan(300);
+    expect(Math.min(...times)).toBeLessThan(LATENCY_BUDGET_MS);
   });
 
   it('prompt-submit hook (runs on every prompt) is silent and fast with auto off and on', () => {
@@ -128,12 +131,12 @@ describe('sessionStart', () => {
     run();
     const off = [run(), run(), run()];
     expect(off.every((r) => r.out === '')).toBe(true);
-    expect(Math.min(...off.map((r) => r.ms))).toBeLessThan(300);
+    expect(Math.min(...off.map((r) => r.ms))).toBeLessThan(LATENCY_BUDGET_MS);
     writeJson(path.join(state, 'config.json'), { auto: true });
     writeJson(path.join(state, 'triggers.json'), { version: 1, learnedAt: new Date().toISOString(), sessions: 1, prompts: 1,
       items: { 'tool:Artifact': { prompts: 1, keywords: [{ word: 'artifact', weight: 1, hits: 1, source: 'name' }] } } });
     const on = [run(), run(), run()];
     expect(on.every((r) => r.out === '')).toBe(true); // no match: still silent
-    expect(Math.min(...on.map((r) => r.ms))).toBeLessThan(300);
+    expect(Math.min(...on.map((r) => r.ms))).toBeLessThan(LATENCY_BUDGET_MS);
   });
 });

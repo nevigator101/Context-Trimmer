@@ -2,7 +2,7 @@ import { parseArgs } from './args.js';
 import { renderDoctor } from './doctor.js';
 import { loadMeasurement, measure } from './measure.js';
 import { resolveProjectRoot } from './paths.js';
-import { renderReport } from './report.js';
+import { fitPath, renderReport } from './report.js';
 import { fmtK } from './tokens.js';
 import { buildLedger, loadLedger } from './usage.js';
 import { allowEnable, apply, off, on, undo, verifyAndRecord } from './commands.js';
@@ -99,7 +99,7 @@ async function main(argv: string[]): Promise<number> {
           const out = sessionStart(hookRoot);
           if (out.systemMessage || out.hookSpecificOutput) process.stdout.write(JSON.stringify(out));
         } else if (a.positional[0] === 'session-end') {
-          sessionEnd(hookRoot, process.argv[1]);
+          sessionEnd(hookRoot);
         } else if (a.positional[0] === 'prompt-submit') {
           const out = promptSubmit(hookRoot, input.prompt ?? '');
           if (out.systemMessage || out.hookSpecificOutput) process.stdout.write(JSON.stringify(out));
@@ -202,7 +202,7 @@ async function main(argv: string[]): Promise<number> {
     case 'projects': {
       const ps = await discoverProjects();
       for (const p of ps) {
-        console.log(`${p.key.padEnd(56).slice(0, 56)} ${String(p.sessions).padStart(4)} sessions  last ${p.lastActive?.slice(0, 10) ?? '-'.padEnd(10)}`
+        console.log(`${fitPath(p.key, 56)} ${String(p.sessions).padStart(4)} sessions  last ${p.lastActive?.slice(0, 10) ?? '-'.padEnd(10)}`
           + `${p.registered ? '  profiled' : ''}${p.exists ? '' : '  (folder gone)'}`);
       }
       return 0;

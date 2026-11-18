@@ -39,7 +39,8 @@ try {
   check('status line emitted', !!startMsg);
 
   // 2. The model invokes /ctx:enable; 3. it runs the command the skill names.
-  const cmd = `node "${cli.replace(/\\/g, '/')}" on Artifact --reason "publish a page"`;
+  // The command exactly as the enable skill names it: the launcher, which its allowed-tools rule covers.
+  const cmd = `"${pluginDir.replace(/\\/g, '/')}/bin/ctx" on Artifact --reason "publish a page"`;
   api.script.push((body) => {
     const last = inspect(body).toolResults.at(-1);
     return last && /ctx:enable|Launching skill/.test(last.content) ? { tool: 'Bash', input: { command: cmd, description: 'Re-enable Artifact' } } : undefined;

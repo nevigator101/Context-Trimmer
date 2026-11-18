@@ -1,0 +1,42 @@
+#!/bin/sh
+# ctx launcher. Hooks and skills run it as "${CLAUDE_PLUGIN_ROOT}/bin/ctx" (Claude Code runs hook commands with sh or
+# bash; on Windows that is Git Bash). It uses Node.js when it is on PATH, otherwise a standalone ctx build:
+#   $CTX_BIN, then ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/ctx/bin/ctx-<os>-<arch>[.exe], then <plugin>/bin/ctx-<os>-<arch>[.exe]
+# With neither, hooks stay silent (SessionStart prints one hint) and other commands fail with a message.
+
+case "$0" in
+  */bin/ctx) root=${0%/bin/ctx} ;;
+  *) root=$(dirname -- "$0")/.. ;;
+esac
+
+if [ -z "$CTX_FORCE_STANDALONE" ] && command -v node >/dev/null 2>&1; then
+  exec node "$root/dist/ctx.mjs" "$@"
+fi
+
+case "$(uname -s 2>/dev/null)" in
+  Linux*) os=linux; ext= ;;
+  Darwin*) os=darwin; ext= ;;
+  MINGW* | MSYS* | CYGWIN* | Windows*) os=windows; ext=.exe ;;
+  *) os=unknown; ext= ;;
+esac
+case "$(uname -m 2>/dev/null)" in
+  x86_64 | amd64) arch=x64 ;;
+  arm64 | aarch64) arch=arm64 ;;
+  *) arch=unknown ;;
+esac
+name="ctx-$os-$arch$ext"
+
+for bin in "$CTX_BIN" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/ctx/bin/$name" "$root/bin/$name"; do
+  if [ -n "$bin" ] && [ -f "$bin" ]; then
+    exec "$bin" "$@"
+  fi
+done
+
+if [ "$1" = hook ]; then
+  if [ "$2" = session-start ]; then
+    printf '%s\n' "{\"systemMessage\":\"ctx needs Node.js 20+ on PATH, or its standalone build $name in ~/.claude/ctx/bin. See the ctx README.\"}"
+  fi
+  exit 0
+fi
+echo "ctx: needs Node.js 20 or later on PATH, or the standalone build $name in ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/ctx/bin (see the ctx README)." >&2
+exit 127

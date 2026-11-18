@@ -2,10 +2,10 @@
 name: trim
 description: Re-measure and re-plan this project's lean profile, then apply the groups the user confirms.
 disable-model-invocation: true
-allowed-tools: Bash(node:*)
+allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/ctx":*)
 argument-hint: "[aggressive]"
 ---
-Re-run the ctx plan for this project. The CLI is `node "${CLAUDE_PLUGIN_ROOT}/dist/ctx.mjs"` (called CTX below).
+Re-run the ctx plan for this project. The CLI is `"${CLAUDE_PLUGIN_ROOT}/bin/ctx"` (called CTX below).
 Run every command from the project root and show its output as printed, in code blocks. Never edit settings
 files yourself.
 

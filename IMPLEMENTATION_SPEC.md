@@ -501,10 +501,10 @@ Run the ctx onboarding for this project, in order:
   "hooks": {
     "SessionStart": [
       { "matcher": "startup|resume|clear",
-        "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/ctx.mjs\" hook session-start" } ] }
+        "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ctx\" hook session-start" } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/ctx.mjs\" hook session-end" } ] }
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ctx\" hook session-end" } ] }
     ]
   }
 }
@@ -517,9 +517,9 @@ Run the ctx onboarding for this project, in order:
 ## 12. Technology
 
 - **TypeScript**, compiled with **esbuild** into a single `dist/ctx.mjs`. **No runtime dependencies**: use only Node built-ins (`fs`, `path`, `os`, `child_process`, `crypto`).
-- **Node.js 20+** at runtime. If `node` is missing, the SessionStart hook can't run. Document this; a later milestone ships standalone binaries (Node SEA or `bun build --compile`).
-- **Dev dependencies:** `typescript`, `esbuild`, `vitest`, `@types/node`.
-- **CI:** GitHub Actions on `windows-latest`, `macos-latest` and `ubuntu-latest`, running unit tests plus `claude plugin validate`.
+- **Runtime [M5]:** hooks and skills call `"${CLAUDE_PLUGIN_ROOT}/bin/ctx"`, a POSIX sh launcher (Claude Code runs hook commands with sh/bash, Git Bash on Windows; VERIFY.md item 32). It runs `node dist/ctx.mjs` when Node is on PATH. Otherwise it runs a standalone build: a Node single executable application, about 94–125 MB (`npm run build:bin`; the release workflow builds one per platform natively and attaches it to the GitHub release). The user puts it in `~/.claude/ctx/bin/ctx-<os>-<arch>[.exe]`. With neither, hooks exit 0 silently and SessionStart prints one hint. Skills use `allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/ctx":*)` (VERIFY.md item 33).
+- **Dev dependencies:** `typescript`, `esbuild`, `vitest`, `@types/node`, `postject` (standalone builds).
+- **CI:** GitHub Actions on `windows-latest`, `macos-latest` and `ubuntu-latest`: typecheck, unit tests, bundle-up-to-date check, `claude plugin validate`, standalone build, and the fresh-install e2e (fake API, no secrets). `release.yml` builds the standalone binaries on tags.
 - **Paths:** Windows paths everywhere (backslashes, drive-letter case, spaces in folder names such as `Observibility Proxy`). Never build shell strings; always pass argument arrays.
 
 ---
@@ -546,7 +546,7 @@ Run the ctx onboarding for this project, in order:
 | **M2 · Plan + apply + undo** | Planner, dependency map, protected list, settings writer, `/ctx:setup`, `/ctx:trim`, `/ctx:on`, `/ctx:off`, `/ctx:undo` | S1, S2 and S3 on the reference project; undo restores files byte for byte |
 | **M3 · Session start + re-enable** | SessionStart hook, capability index, `/ctx:enable`, re-enable feedback into the planner | S4 and S5; a re-enabled item is not trimmed again |
 | **M4 · Cross-project + triggers** | `/ctx:global`, project registry, learned `UserPromptSubmit` triggers (opt-in) | Switching between two profiled projects loads each one's extras only in that project |
-| **M5 · Distribution** | Marketplace listing, standalone binaries, README with screenshots of the terminal output | Clean install on a fresh machine for each OS |
+| **M5 · Distribution** | Marketplace listing, standalone binaries, README with screenshots of the terminal output | Clean install on a fresh machine for each OS. **Met on Windows and Linux** (`test/e2e/fresh-install.mjs`, VERIFY.md item 36); macOS runs in CI |
 
 ---
 

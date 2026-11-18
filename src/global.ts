@@ -11,7 +11,7 @@ import { firstSentence } from './runner.js';
 import { loadScopes, pluginDescriptions, type Json } from './settings.js';
 import { fmtK1 } from './tokens.js';
 import { readGlobalCounters, scanLedger, type Ledger } from './usage.js';
-import { wrapJoin } from './report.js';
+import { fitPath, wrapJoin } from './report.js';
 import {
   appliedPath, clearEntry, describeRef, globalTarget, loadApplied, ownedRefs, refFromKey, refKey, setEntry, writeSettings,
   type EntryRef,
@@ -207,7 +207,7 @@ export function renderGlobalPlan(plan: GlobalPlan): string {
   out.push(`ctx global: ${active.length} active project${active.length === 1 ? '' : 's'} (session in the last ${plan.activeDays} days), `
     + `${plan.windowSessions} sessions each`);
   for (const p of plan.projects) {
-    out.push(`  ${p.key.padEnd(48).slice(0, 48)} ${String(p.sessions).padStart(3)} sessions  last ${p.lastActive?.slice(0, 10) ?? '-'}`
+    out.push(`  ${fitPath(p.key, 48)} ${String(p.sessions).padStart(3)} sessions  last ${p.lastActive?.slice(0, 10) ?? '-'}`
       + `${p.registered ? '  profiled' : ''}${p.active ? '' : '  (inactive)'}`);
   }
   out.push('');

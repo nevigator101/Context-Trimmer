@@ -8,7 +8,8 @@
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "validate": "node build.mjs && node scripts/validate.mjs"
+    "validate": "node build.mjs && node scripts/validate.mjs",
+    "build:bin": "node build.mjs && node scripts/build-sea.mjs"
   },
   "engines": {
     "node": ">=20"
@@ -16,6 +17,7 @@
   "devDependencies": {
     "@types/node": "^26.6.6",
     "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0"
   }

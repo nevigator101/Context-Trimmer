@@ -51,6 +51,18 @@ server that saves the request body and answers HTTP 400, so no model call is mad
 | 29 | M4 acceptance: two projects, each with its own extra (`test/e2e/global-switch.mjs`, real binary, temp config dir) | Before: both plugins load in both projects. After `ctx global apply`: A loads only cloudflare, B only watch. B's SessionStart index lists cloudflare as switched off; `ctx on cloudflare` in B adds a local override and B loads it. `ctx global undo` restores the user settings byte for byte and removes A's override. | Met. |
 | 30 | Prompt-submit hook cost | Silent unless a trigger matches; under 300 ms per prompt with auto off and on (unit test). With auto off it reads one small config file and exits. | Registered unconditionally in `hooks.json`; `/ctx:auto on` only flips the config. |
 
+## Milestone 5 findings (2026-11-18)
+
+| # | Question | Result | Design impact |
+|---|---|---|---|
+| 31 | Can ctx run on Claude Code's own binary (Bun-compiled) instead of Node? | **No.** `BUN_BE_BUN=1 claude <script>` is ignored; the binary acts as Claude Code. | Node, or a standalone ctx build. |
+| 32 | Which shell runs plugin hook commands on Windows? | **Git Bash** (`$0` = `/usr/bin/bash`). `${CLAUDE_PLUGIN_ROOT}` arrives as `C:/…` with forward slashes. An extensionless `#!/bin/sh` script under it runs directly. | One POSIX launcher, `bin/ctx`, for hooks and skills on every OS. |
+| 33 | Which `allowed-tools` rule lets a skill run the launcher without a prompt? | `${CLAUDE_PLUGIN_ROOT}` **is substituted in `allowed-tools`**. `Bash("${CLAUDE_PLUGIN_ROOT}/bin/ctx":*)` matches `"<root>/bin/ctx" …`, including a space in the path. `Bash(sh:*)` also works but is broad. The unquoted form, a `*/bin/ctx:*` glob, and `Bash(node:*)` are refused. | Every skill uses the quoted rule: narrower than the old `Bash(node:*)`. |
+| 34 | Fully isolated fake-API sessions | With a temporary `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY` alone gives "Not logged in". `apiKeyHelper: "echo sk-fake-key"` in that config's `settings.json` works: no login, no real config. | Used by `fresh-install.mjs`. |
+| 35 | Standalone builds | Node single executable: **94 MB** (Windows), **125 MB** (Linux). `deno compile`: 169 MB. Both run the bundle unchanged. In the Node build, `process.argv[1]` isn't a `.mjs` path, which is how ctx detects it and re-runs itself for background refreshes. Injecting invalidates the Windows Authenticode signature (unsigned binary). | Node SEA, built natively per platform in CI (release workflow). Too large to ship in the plugin: release assets, installed into `~/.claude/ctx/bin/`. |
+| 36 | M5 acceptance: clean install (`test/e2e/fresh-install.mjs`) | **Windows (2.1.326) and Linux in Docker (2.1.327, `node:22-bookworm`): all 16 checks pass.** `plugin marketplace add <repo>` and `plugin install ctx@ctx` in a fresh config. Hooks run. Only `ctx:enable` is listed for the model. `/ctx:doctor` runs without a prompt. Without Node: one SessionStart hint, exit 0 everywhere, and a clear message from skills. With the standalone build: `/ctx:doctor` and a full `/ctx:report` measurement work. After `plugin uninstall`, no ctx hooks run. macOS runs in CI (`.github/workflows/ci.yml`); not run here. | Met on Windows and Linux. |
+| 37 | Stream events for hooks | `-p --output-format stream-json` reports SessionStart hook runs (`hook_response`). UserPromptSubmit runs that print nothing aren't reported; output from one appears as `UserPromptSubmit says: …`. | Tests check silence by the absence of such events. |
+
 ## Changes to the design (applied in code)
 
 1. Every measurement run passes `--no-session-persistence` and spawns with stdin ignored.
@@ -60,6 +72,7 @@ server that saves the request body and answers HTTP 400, so no model call is mad
 5. The measurement cache is stored **per project** (`projects/<hash>/measurement.json`), keyed by Claude Code version plus a fingerprint of the settings files, because costs depend on the project's skills, memory files and MCP config.
 6. **M4:** `/ctx:global` writes user settings (`~/.claude/settings.json`) through the same writer, with its own ownership record and backups in `~/.claude/ctx/global/`. Claude Code writes `enabledPlugins: {"x": true}` there on install, so the global writer may *replace* a `true` with `false` and records the old value; undo puts it back. Built-in tools are never trimmed globally (a user-level deny can't be overridden per project).
 7. **M4:** `ctx on` for a plugin or skill switched off in user or shared project settings writes a project-local keep-on override instead of telling the user to edit the other file.
+8. **M5:** hooks and skills call `"${CLAUDE_PLUGIN_ROOT}/bin/ctx"`, a POSIX launcher that runs `node dist/ctx.mjs` when Node is on PATH, and otherwise a standalone build (`$CTX_BIN`, `~/.claude/ctx/bin/ctx-<os>-<arch>[.exe]`, or the plugin's `bin/`).
 
 ## Still open
 

@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import deps from './deps.json' with { type: 'json' };
 import { on } from './commands.js';
+import { selfCommand } from './self.js';
 import { globalOffHere } from './global.js';
 import { DEFAULT_THRESHOLD, loadConfig, loadTriggers, scorePrompt, shortId } from './triggers.js';
 import { loadMeasurement, type Measurement } from './measure.js';
@@ -109,8 +110,9 @@ export function sessionStart(root: string): SessionStartOutput {
   return out;
 }
 
-function spawnDetached(cliPath: string, args: string[]): void {
-  const child = spawn(process.execPath, [cliPath, ...args], { detached: true, stdio: 'ignore', windowsHide: true, shell: false });
+function spawnDetached(args: string[]): void {
+  const self = selfCommand();
+  const child = spawn(self.cmd, [...self.args, ...args], { detached: true, stdio: 'ignore', windowsHide: true, shell: false });
   child.unref();
 }
 
@@ -121,11 +123,11 @@ const LEARN_EVERY_MS = 6 * 3600_000;
  * SessionEnd: refresh the usage ledger (and, with auto on, the trigger table) in detached processes so the session
  * closes immediately.
  */
-export function sessionEnd(root: string, cliPath: string): void {
-  if (loadMeasurement(root) || loadLedger(root)) spawnDetached(cliPath, ['usage', '--quiet', '--project', root]);
+export function sessionEnd(root: string): void {
+  if (loadMeasurement(root) || loadLedger(root)) spawnDetached(['usage', '--quiet', '--project', root]);
   if (loadConfig().auto) {
     const t = loadTriggers();
-    if (!t || Date.now() - Date.parse(t.learnedAt) > LEARN_EVERY_MS) spawnDetached(cliPath, ['triggers', 'learn', '--quiet']);
+    if (!t || Date.now() - Date.parse(t.learnedAt) > LEARN_EVERY_MS) spawnDetached(['triggers', 'learn', '--quiet']);
   }
 }
 

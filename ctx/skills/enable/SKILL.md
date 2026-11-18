@@ -1,14 +1,14 @@
 ---
 name: enable
 description: Turn a tool, plugin or skill that ctx switched off back on, when the current task needs it. Use the item names from the 'Switched off in this project' list.
-allowed-tools: Bash(node:*)
+allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/ctx":*)
 argument-hint: "<item>"
 ---
 Switch the item back on. Run from the project root, filling in the item if it isn't given here ("$ARGUMENTS") and
 a one-line description of the task that needs it:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/dist/ctx.mjs" on <item> --reason "<task>"
+"${CLAUDE_PLUGIN_ROOT}/bin/ctx" on <item> --reason "<task>"
 ```
 
 Then follow what the output says, and tell the user in one line what you switched on and why:

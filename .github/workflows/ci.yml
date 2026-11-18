@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Shared runners are slower than a developer machine; S5 (300 ms) is checked locally.
+      CTX_LATENCY_BUDGET_MS: '1500'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Bundle is up to date
+        run: |
+          npm run build
+          git diff --exit-code -- ctx/dist
+      - name: Install Claude Code (native binary from npm)
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          echo "CTX_CLAUDE_BIN=$(npm root -g)/@anthropic-ai/claude-code/bin/claude.exe" >> "$GITHUB_ENV"
+      - name: Validate marketplace and plugin
+        run: |
+          "$CTX_CLAUDE_BIN" --version
+          "$CTX_CLAUDE_BIN" plugin validate .
+          "$CTX_CLAUDE_BIN" plugin validate ./ctx
+      - name: Standalone build
+        run: node scripts/build-sea.mjs
+      - name: Fresh install end to end (fake API, temporary config; no secrets)
+        run: node test/e2e/fresh-install.mjs

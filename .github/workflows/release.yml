@@ -1,0 +1,62 @@
+name: release
+
+# Push a tag like v0.1.0 to build the standalone ctx binaries natively on each platform and attach them to the
+# GitHub release. The plugin itself ships without them; users without Node.js put the one for their platform in
+# ~/.claude/ctx/bin/ (see ctx/README.md).
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: ctx-linux-x64 }
+          - { os: ubuntu-24.04-arm, name: ctx-linux-arm64 }
+          - { os: macos-latest, name: ctx-darwin-arm64 }
+          - { os: macos-15-intel, name: ctx-darwin-x64 }
+          - { os: windows-latest, name: ctx-windows-x64.exe }
+          - { os: windows-11-arm, name: ctx-windows-arm64.exe }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: node scripts/build-sea.mjs
+      - name: Checksum
+        run: |
+          cd release
+          test -f "${{ matrix.name }}"
+          if command -v sha256sum >/dev/null; then sha256sum "${{ matrix.name }}"; else shasum -a 256 "${{ matrix.name }}"; fi > "${{ matrix.name }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: release/${{ matrix.name }}*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "Standalone ctx builds for machines without Node.js."
+          gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber dist/*

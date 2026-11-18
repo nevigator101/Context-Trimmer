@@ -4,7 +4,80 @@ ctx measures what every new Claude Code session loads up front in a project: bui
 
 It then writes a lean profile to the project's `.claude/settings.local.json`, using only entries it can undo: tool denies, plugins off, and skills set to name-only. Items used in the project's recent sessions are never switched off unless you confirm.
 
-**Status: 0.1.0, milestone 4 (measure, report, plan, apply, undo, session start, re-enable, cross-project baseline, learned triggers).**
+**Status: 0.1.0.** Tested on Windows and Linux. CI covers macOS.
+
+## Install
+
+In Claude Code:
+
+```
+/plugin marketplace add <owner>/<repo>
+/plugin install ctx@ctx
+```
+
+Then open a project and run `/ctx:setup`. Nothing changes in any project until you confirm a plan there.
+
+ctx needs Node.js 20 or later on PATH. Without Node, download the standalone build for your platform from the repository's releases (`ctx-windows-x64.exe`, `ctx-darwin-arm64`, `ctx-linux-x64`, ...). Put it in `~/.claude/ctx/bin/` (on macOS and Linux, `chmod +x` it). The plugin's launcher uses Node when it finds it, and the standalone build otherwise. If it finds neither, it prints one line at session start and stays out of the way.
+
+## What it looks like
+
+These samples come from a scratch project with six recorded sessions that used only the basic file and shell tools and, once, the watch plugin (`test/e2e/demo.mjs` regenerates them). `/ctx:setup` shows the plan and asks which groups to apply:
+
+```
+ctx plan: ~/code/demo-app   (untrimmed 32.6K, usage window 6 sessions)
+
+[tools] Deny unused built-in tools   est. -21.9K
+  tool:Artifact                           18.8K  off   never used
+  tool:ScheduleWakeup                      1.7K  off   never used
+  tool:ReportFindings                      0.8K  off   never used
+  tool:ListAgents                          0.4K  off   never used
+  skill:loop                               0.1K  soft  goes with tool:ScheduleWakeup (dependency)
+  skill:artifact-design                    0.1K  soft  goes with tool:Artifact (dependency)
+  skill:artifact-diagramming               0.1K  soft  goes with tool:Artifact (dependency)
+
+[plugins] Switch off plugins not used here   est. -1.4K
+  plugin:cloudflare@cloudflare             1.4K  off   never used
+
+[skills] Unused skills to name-only (still callable by name)   est. -1.4K
+  skill:dataviz                            0.5K  soft  never used
+  skill:claude-api                         0.4K  soft  never used
+  skill:code-review                        0.3K  soft  never used
+  skill:update-config                      0.2K  soft  never used
+
+Kept on: watch@claude-video (used) · Agent (protected) · AskUserQuestion (protected)
+         Bash (protected) · Edit (protected) · Glob (protected) · Grep (protected)
+         Read (protected) · Write (protected)
+```
+
+Applying it ends with one verification run:
+
+```
+Upfront context for new sessions: 32.6K -> 8.1K (untrimmed 32.6K); /context will show 11.1K.
+Start a new session (/clear or a new chat) to use it. This session keeps the tools it started with.
+```
+
+`/ctx:report` at any time:
+
+```
+ctx report: ~/code/demo-app   (Claude Code 2.1.326, measured 2026-11-18)
+
+Upfront per new session: 8.1K (untrimmed 32.6K, -75%)
+  (/context shows 11.1K: its total doesn't subtract skill and plugin trims.)
+  System prompt        2.0K
+  Built-in tools       5.3K   deny saves: Agent 1.8K · Bash 1.3K · Grep 1.1K · Read 0.8K · Edit 0.7K
+                              Glob 0.3K · ...
+  Skills               0.7K   7 name-only
+  MCP                  0.0K
+  Memory files         0.1K   1 file
+
+Switched off:  tool Artifact (18.8K) · tool ScheduleWakeup (1.7K) · tool ReportFindings (0.8K)
+               tool ListAgents (0.4K) · plugin cloudflare (1.4K)
+Usage, last 6 sessions (sessions used): Read 6 · Edit 6 · Bash 6 · Grep 6 · Glob 6 · Skill 1
+  skill watch:watch 1 · Write 1
+Suggestions: none above 200 tokens.
+```
+
+Your numbers depend on your plugins, skills and MCP servers; a setup with more extras saves more.
 
 ## Commands
 
@@ -21,7 +94,7 @@ It then writes a lean profile to the project's `.claude/settings.local.json`, us
 | `/ctx:auto on\|off` | Learned triggers: when a prompt clearly needs a switched-off item ("deploy with wrangler"), ctx switches it on before Claude reads the prompt |
 | `/ctx:doctor` | Shows which `claude` binary is used, the settings files and their scopes, the transcript folders, how fresh the cache is, and whether the profile is in force |
 
-The CLI can also be run directly: `node dist/ctx.mjs help`.
+The CLI can also be run directly: `bin/ctx help` in the plugin folder.
 
 ## Safety
 
@@ -58,8 +131,10 @@ The plugin itself costs about 50 tokens per session: the `ctx:enable` line in th
 
 ## Requirements
 
-- Node.js 20 or later on PATH.
-- Claude Code. If the `claude` binary isn't on PATH, ctx looks in the usual install locations and inside the VS Code extension. Set `CTX_CLAUDE_BIN` to override.
+- Node.js 20 or later on PATH, or the standalone build in `~/.claude/ctx/bin/` (see Install). `CTX_BIN` can point at a standalone build anywhere.
+- Claude Code. Hooks and skills run the `bin/ctx` launcher through the shell Claude Code uses for commands (sh or bash; Git Bash on Windows).
+- For measuring, ctx runs `claude` itself. If the binary isn't on PATH, ctx looks in the usual install locations and inside the VS Code extension. Set `CTX_CLAUDE_BIN` to override.
+- The standalone builds aren't code-signed. Windows may warn the first time one runs; on macOS, remove the quarantine flag (`xattr -d com.apple.quarantine <file>`) if Gatekeeper blocks it.
 
 ## Data
 

@@ -7,6 +7,11 @@ import type { Ledger } from './usage.js';
 
 const WIDTH = 100;
 
+/** Fit a path into `n` columns, keeping its end (the project name): "…/Users/me/code/site". */
+export function fitPath(s: string, n: number): string {
+  return s.length <= n ? s.padEnd(n) : `…${s.slice(s.length - n + 1)}`;
+}
+
 /** Join parts with " · ", wrapping at WIDTH with a hanging indent. */
 export function wrapJoin(prefix: string, parts: string[], indent = prefix.length): string {
   const lines: string[] = [];
