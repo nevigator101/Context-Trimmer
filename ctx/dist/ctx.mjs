@@ -4,7 +4,21 @@
 function parseArgs(argv) {
   const flags = {};
   const positional = [];
-  const valued = /* @__PURE__ */ new Set(["only", "sessions", "plan", "project", "set", "groups", "reason", "level", "min-tokens"]);
+  const valued = /* @__PURE__ */ new Set([
+    "only",
+    "sessions",
+    "plan",
+    "project",
+    "set",
+    "groups",
+    "reason",
+    "level",
+    "min-tokens",
+    "days",
+    "share",
+    "items",
+    "threshold"
+  ]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
@@ -18,7 +32,7 @@ function parseArgs(argv) {
 }
 
 // src/doctor.ts
-import fs7 from "node:fs";
+import fs8 from "node:fs";
 
 // src/binary.ts
 import { spawnSync } from "node:child_process";
@@ -161,8 +175,8 @@ function findClaude() {
 
 // src/measure.ts
 import { createHash as createHash2 } from "node:crypto";
-import fs4 from "node:fs";
-import path4 from "node:path";
+import fs5 from "node:fs";
+import path5 from "node:path";
 
 // src/tokens.ts
 function parseTokens(raw) {
@@ -263,6 +277,108 @@ function parseContext(md) {
 }
 function pluginOfSource(source) {
   return source.match(/^Plugin \((.+)\)$/)?.[1];
+}
+
+// src/registry.ts
+import fs3 from "node:fs";
+import path3 from "node:path";
+import readline from "node:readline";
+function registryPath() {
+  return path3.join(ctxHome(), "registry.json");
+}
+function loadRegistry() {
+  const r = readJson(registryPath());
+  return r && r.projects ? r : { version: 1, projects: {} };
+}
+function registerProject(root) {
+  try {
+    const reg = loadRegistry();
+    const key = projectKey(root);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const cur = reg.projects[key];
+    reg.projects[key] = { root: path3.resolve(root), firstSeen: cur?.firstSeen ?? now, lastSeen: now };
+    writeJson(registryPath(), reg);
+  } catch {
+  }
+}
+async function cwdOf(file) {
+  const stream = fs3.createReadStream(file, { encoding: "utf8" });
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  let n = 0;
+  try {
+    for await (const line of rl) {
+      if (++n > 200) break;
+      if (!line.includes('"cwd"')) continue;
+      try {
+        const j = JSON.parse(line);
+        if (typeof j.cwd === "string" && j.cwd) return j.cwd;
+      } catch {
+      }
+    }
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+  return void 0;
+}
+async function discoverProjects() {
+  const base = path3.join(claudeDir(), "projects");
+  const reg = loadRegistry();
+  const bySlug = /* @__PURE__ */ new Map();
+  let entries = [];
+  try {
+    entries = fs3.readdirSync(base, { withFileTypes: true });
+  } catch {
+  }
+  for (const d of entries) {
+    if (!d.isDirectory()) continue;
+    const dir = path3.join(base, d.name);
+    const slot = bySlug.get(d.name.toLowerCase()) ?? { dirs: [], files: [] };
+    slot.dirs.push(dir);
+    try {
+      for (const f of fs3.readdirSync(dir)) {
+        if (!f.endsWith(".jsonl")) continue;
+        try {
+          slot.files.push({ file: path3.join(dir, f), mtime: fs3.statSync(path3.join(dir, f)).mtimeMs });
+        } catch {
+        }
+      }
+    } catch {
+    }
+    bySlug.set(d.name.toLowerCase(), slot);
+  }
+  const out = /* @__PURE__ */ new Map();
+  const regBySlug = /* @__PURE__ */ new Map();
+  for (const e of Object.values(reg.projects)) regBySlug.set(transcriptSlug(e.root).toLowerCase(), e);
+  for (const [slug, slot] of bySlug) {
+    if (!slot.files.length) continue;
+    slot.files.sort((a, b) => b.mtime - a.mtime);
+    let root = regBySlug.get(slug)?.root;
+    if (!root) {
+      for (const f of slot.files.slice(0, 3)) {
+        const cwd = await cwdOf(f.file);
+        if (cwd && transcriptSlug(cwd).toLowerCase() === slug) {
+          root = cwd;
+          break;
+        }
+      }
+    }
+    if (!root) continue;
+    const key = projectKey(root);
+    out.set(key, {
+      key,
+      root: path3.resolve(root),
+      dirs: slot.dirs,
+      lastActive: new Date(slot.files[0].mtime).toISOString(),
+      sessions: slot.files.length,
+      exists: fs3.existsSync(root),
+      registered: key in reg.projects
+    });
+  }
+  for (const [key, e] of Object.entries(reg.projects)) {
+    if (!out.has(key)) out.set(key, { key, root: e.root, dirs: [], sessions: 0, exists: fs3.existsSync(e.root), registered: true });
+  }
+  return [...out.values()].sort((a, b) => (b.lastActive ?? "").localeCompare(a.lastActive ?? ""));
 }
 
 // src/runner.ts
@@ -419,20 +535,20 @@ function firstSentence(text, max = 80) {
 }
 
 // src/settings.ts
-import fs3 from "node:fs";
-import path3 from "node:path";
+import fs4 from "node:fs";
+import path4 from "node:path";
 function managedSettingsPath() {
   if (process.platform === "win32") return "C:\\Program Files\\ClaudeCode\\managed-settings.json";
   if (process.platform === "darwin") return "/Library/Application Support/ClaudeCode/managed-settings.json";
   return "/etc/claude-code/managed-settings.json";
 }
 function localSettingsPath(root) {
-  return path3.join(root, ".claude", "settings.local.json");
+  return path4.join(root, ".claude", "settings.local.json");
 }
 function load(scope, file) {
-  if (!fs3.existsSync(file)) return { scope, path: file, exists: false };
+  if (!fs4.existsSync(file)) return { scope, path: file, exists: false };
   try {
-    const data = JSON.parse(fs3.readFileSync(file, "utf8"));
+    const data = JSON.parse(fs4.readFileSync(file, "utf8"));
     if (!data || typeof data !== "object" || Array.isArray(data)) return { scope, path: file, exists: true, error: "not a JSON object" };
     return { scope, path: file, exists: true, data };
   } catch (e) {
@@ -441,8 +557,8 @@ function load(scope, file) {
 }
 function loadScopes(root) {
   return [
-    load("user", path3.join(claudeDir(), "settings.json")),
-    load("project", path3.join(root, ".claude", "settings.json")),
+    load("user", path4.join(claudeDir(), "settings.json")),
+    load("project", path4.join(root, ".claude", "settings.json")),
     load("local", localSettingsPath(root)),
     load("managed", managedSettingsPath())
   ];
@@ -462,27 +578,33 @@ function stripTrimKeys(data) {
     for (const [k, v] of Object.entries(out.enabledPlugins)) if (v === false) delete out.enabledPlugins[k];
     if (!Object.keys(out.enabledPlugins).length) delete out.enabledPlugins;
   }
-  delete out.skillOverrides;
+  if (isObj(out.skillOverrides)) {
+    for (const [k, v] of Object.entries(out.skillOverrides)) if (v !== "on") delete out.skillOverrides[k];
+    if (!Object.keys(out.skillOverrides).length) delete out.skillOverrides;
+  }
   delete out.disabledMcpjsonServers;
   return out;
 }
 function effectivePlugins(scopes, opts = {}) {
   const out = {};
   for (const s of scopes) {
-    if (s.scope === "managed" || opts.skipLocal && s.scope === "local") continue;
+    if (s.scope === "managed") continue;
     const ep = s.data?.enabledPlugins;
     if (isObj(ep)) {
-      for (const [k, v] of Object.entries(ep)) if (typeof v === "boolean") out[k] = v;
+      for (const [k, v] of Object.entries(ep)) {
+        if (typeof v !== "boolean" || opts.skipLocal && s.scope === "local" && !v) continue;
+        out[k] = v;
+      }
     }
   }
   return out;
 }
 function installedPlugins(root) {
   const j = readJson(
-    path3.join(claudeDir(), "plugins", "installed_plugins.json")
+    path4.join(claudeDir(), "plugins", "installed_plugins.json")
   );
   const out = [];
-  const norm = (p) => path3.resolve(p).toLowerCase();
+  const norm = (p) => path4.resolve(p).toLowerCase();
   for (const [id, installs] of Object.entries(j?.plugins ?? {})) {
     if (installs.some((i) => i.scope === "user" || i.projectPath && norm(i.projectPath) === norm(root))) out.push(id);
   }
@@ -490,13 +612,13 @@ function installedPlugins(root) {
 }
 function pluginDescriptions() {
   const j = readJson(
-    path3.join(claudeDir(), "plugins", "installed_plugins.json")
+    path4.join(claudeDir(), "plugins", "installed_plugins.json")
   );
   const out = {};
   for (const [id, installs] of Object.entries(j?.plugins ?? {})) {
     for (const i of installs) {
       if (!i.installPath) continue;
-      const pj = readJson(path3.join(i.installPath, ".claude-plugin", "plugin.json"));
+      const pj = readJson(path4.join(i.installPath, ".claude-plugin", "plugin.json"));
       if (pj?.description) {
         out[id] = pj.description;
         break;
@@ -535,7 +657,7 @@ var SEED_TOOLS = [
 ];
 var NEVER_TOGGLE = /* @__PURE__ */ new Set(["Skill", "ToolSearch", "EndConversation", "DeferredToolPlaceholder"]);
 function measurementPath(root) {
-  return path4.join(projectStateDir(root), "measurement.json");
+  return path5.join(projectStateDir(root), "measurement.json");
 }
 function loadMeasurement(root) {
   return readJson(measurementPath(root));
@@ -546,13 +668,13 @@ function fingerprint(root, scopes, ccVersion) {
   h.update(`local:${local?.exists ? JSON.stringify(stripTrimKeys(local.data)) : "absent"}`);
   const files = [
     ...scopes.filter((s) => s.scope !== "local").map((s) => s.path),
-    path4.join(root, ".mcp.json"),
-    path4.join(root, "CLAUDE.md"),
-    path4.join(root, ".claude", "CLAUDE.md")
+    path5.join(root, ".mcp.json"),
+    path5.join(root, "CLAUDE.md"),
+    path5.join(root, ".claude", "CLAUDE.md")
   ];
   for (const f of files) {
     try {
-      h.update(f).update(fs4.readFileSync(f));
+      h.update(f).update(fs5.readFileSync(f));
     } catch {
       h.update(`${f}:absent`);
     }
@@ -724,6 +846,7 @@ async function measure(root, opts = {}) {
     unparsed: refR.unparsed.map((u) => u.heading)
   };
   writeJson(measurementPath(root), m);
+  registerProject(root);
   return m;
 }
 async function verifyRun(root, settings, reference, quirk) {
@@ -735,9 +858,9 @@ async function verifyRun(root, settings, reference, quirk) {
 }
 
 // src/usage.ts
-import fs5 from "node:fs";
-import path5 from "node:path";
-import readline from "node:readline";
+import fs6 from "node:fs";
+import path6 from "node:path";
+import readline2 from "node:readline";
 function normalizeSkillName(name) {
   return name.replace(/^anthropic-skills:/, "");
 }
@@ -753,8 +876,8 @@ function itemsForToolUse(name, input) {
 }
 var COMMAND_RE = /<command-name>\/?([^<\s]+)<\/command-name>/g;
 async function scanFile(file, into) {
-  const stream = fs5.createReadStream(file, { encoding: "utf8" });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  const stream = fs6.createReadStream(file, { encoding: "utf8" });
+  const rl = readline2.createInterface({ input: stream, crlfDelay: Infinity });
   const bump = (id, ts) => {
     const c = into.calls.get(id) ?? { n: 0 };
     c.n++;
@@ -784,14 +907,20 @@ async function scanFile(file, into) {
   }
 }
 async function buildLedger(root, opts = {}) {
+  const ledger = await scanLedger(root, opts);
+  writeJson(ledgerPath(root), ledger);
+  registerProject(root);
+  return ledger;
+}
+async function scanLedger(root, opts = {}) {
   const window = opts.sessions ?? 10;
   const files = [];
-  for (const dir of transcriptDirs(root)) {
-    for (const f of fs5.readdirSync(dir)) {
+  for (const dir of opts.dirs ?? transcriptDirs(root)) {
+    for (const f of fs6.readdirSync(dir)) {
       if (!f.endsWith(".jsonl")) continue;
-      const full = path5.join(dir, f);
+      const full = path6.join(dir, f);
       try {
-        files.push({ file: full, id: f.slice(0, -6), mtime: fs5.statSync(full).mtimeMs, dir });
+        files.push({ file: full, id: f.slice(0, -6), mtime: fs6.statSync(full).mtimeMs, dir });
       } catch {
       }
     }
@@ -814,9 +943,9 @@ async function buildLedger(root, opts = {}) {
     const scan = { calls: /* @__PURE__ */ new Map(), assistantTurns: 0 };
     await scanFile(f.file, scan);
     if (scan.assistantTurns === 0) continue;
-    const subDir = path5.join(f.dir, f.id, "subagents");
+    const subDir = path6.join(f.dir, f.id, "subagents");
     try {
-      for (const s of fs5.readdirSync(subDir)) if (s.endsWith(".jsonl")) await scanFile(path5.join(subDir, s), scan);
+      for (const s of fs6.readdirSync(subDir)) if (s.endsWith(".jsonl")) await scanFile(path6.join(subDir, s), scan);
     } catch {
     }
     let calls = 0;
@@ -829,7 +958,6 @@ async function buildLedger(root, opts = {}) {
     }
     ledger.sessions.push({ id: f.id, file: f.file, mtime: new Date(f.mtime).toISOString(), calls });
   }
-  writeJson(ledgerPath(root), ledger);
   return ledger;
 }
 function readGlobalCounters() {
@@ -837,7 +965,7 @@ function readGlobalCounters() {
   return { skillUsage: j?.skillUsage ?? {}, pluginUsage: j?.pluginUsage ?? {} };
 }
 function ledgerPath(root) {
-  return path5.join(projectStateDir(root), "ledger.json");
+  return path6.join(projectStateDir(root), "ledger.json");
 }
 function loadLedger(root) {
   return readJson(ledgerPath(root));
@@ -849,26 +977,33 @@ function globalSkillCount(l, skill) {
 
 // src/writer.ts
 import { createHash as createHash3 } from "node:crypto";
-import fs6 from "node:fs";
-import path6 from "node:path";
+import fs7 from "node:fs";
+import path7 from "node:path";
 var emptyEntries = () => ({ deny: [], plugins: {}, skills: {}, mcpjson: [], allow: [] });
 function emptyApplied(file) {
   return { version: 1, file, owned: emptyEntries(), preexisting: emptyEntries(), history: [] };
 }
 var KEEP_BACKUPS = 20;
-function appliedPath(root) {
-  return path6.join(projectStateDir(root), "applied.json");
+function projectTarget(root) {
+  return { file: localSettingsPath(root), stateDir: projectStateDir(root) };
 }
-function backupDir(root) {
-  return path6.join(projectStateDir(root), "backups");
+function globalTarget() {
+  return { file: path7.join(claudeDir(), "settings.json"), stateDir: path7.join(ctxHome(), "global") };
 }
-function loadApplied(root) {
-  const a = readJson(appliedPath(root)) ?? emptyApplied(localSettingsPath(root));
+var T = (w) => typeof w === "string" ? projectTarget(w) : w;
+function appliedPath(w) {
+  return path7.join(T(w).stateDir, "applied.json");
+}
+function backupDir(w) {
+  return path7.join(T(w).stateDir, "backups");
+}
+function loadApplied(w) {
+  const a = readJson(appliedPath(w)) ?? emptyApplied(T(w).file);
   a.owned = { ...emptyEntries(), ...a.owned };
   a.preexisting = { ...emptyEntries(), ...a.preexisting };
   return a;
 }
-var realOps = { renameSync: fs6.renameSync };
+var realOps = { renameSync: fs7.renameSync };
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -888,14 +1023,14 @@ function serialize(obj, style) {
   return style.finalNewline ? s + style.eol : s;
 }
 function atomicWrite(file, data, ops = realOps) {
-  fs6.mkdirSync(path6.dirname(file), { recursive: true });
+  fs7.mkdirSync(path7.dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
-  const fd = fs6.openSync(tmp, "w");
+  const fd = fs7.openSync(tmp, "w");
   try {
-    fs6.writeSync(fd, typeof data === "string" ? Buffer.from(data, "utf8") : data);
-    fs6.fsyncSync(fd);
+    fs7.writeSync(fd, typeof data === "string" ? Buffer.from(data, "utf8") : data);
+    fs7.fsyncSync(fd);
   } finally {
-    fs6.closeSync(fd);
+    fs7.closeSync(fd);
   }
   let lastErr;
   for (let i = 0; i < 6; i++) {
@@ -908,7 +1043,7 @@ function atomicWrite(file, data, ops = realOps) {
     }
   }
   try {
-    fs6.unlinkSync(tmp);
+    fs7.unlinkSync(tmp);
   } catch {
   }
   throw new Error(`could not replace ${file}: ${lastErr?.message ?? lastErr}`);
@@ -916,54 +1051,70 @@ function atomicWrite(file, data, ops = realOps) {
 function newBackupId(dir) {
   let id = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
   let n = 0;
-  while (fs6.existsSync(path6.join(dir, `${id}.state.json`))) id = `${id.replace(/_\d+$/, "")}_${++n}`;
+  while (fs7.existsSync(path7.join(dir, `${id}.state.json`))) id = `${id.replace(/_\d+$/, "")}_${++n}`;
   return id;
 }
-function backup(root) {
-  const dir = backupDir(root);
-  fs6.mkdirSync(dir, { recursive: true });
+function backup(w) {
+  const dir = backupDir(w);
+  fs7.mkdirSync(dir, { recursive: true });
   const id = newBackupId(dir);
-  const file = localSettingsPath(root);
-  const exists = fs6.existsSync(file);
-  if (exists) fs6.copyFileSync(file, path6.join(dir, `${id}.settings.local.json`));
-  const applied = readJson(appliedPath(root));
-  fs6.writeFileSync(path6.join(dir, `${id}.state.json`), JSON.stringify({ settingsExisted: exists, applied: applied ?? null }));
+  const file = T(w).file;
+  const exists = fs7.existsSync(file);
+  if (exists) fs7.copyFileSync(file, path7.join(dir, `${id}.settings.local.json`));
+  const applied = readJson(appliedPath(w));
+  fs7.writeFileSync(path7.join(dir, `${id}.state.json`), JSON.stringify({ settingsExisted: exists, applied: applied ?? null }));
   return id;
 }
-function listBackups(root) {
+function listBackups(w) {
   try {
-    return fs6.readdirSync(backupDir(root)).filter((f) => f.endsWith(".state.json")).map((f) => f.slice(0, -".state.json".length)).sort();
+    return fs7.readdirSync(backupDir(w)).filter((f) => f.endsWith(".state.json")).map((f) => f.slice(0, -".state.json".length)).sort();
   } catch {
     return [];
   }
 }
-function pruneBackups(root, keep) {
-  const all = listBackups(root).filter((b) => b !== keep);
-  for (const id of all.slice(0, Math.max(0, all.length - KEEP_BACKUPS))) removeBackup(root, id);
+function pruneBackups(w, keep) {
+  const all = listBackups(w).filter((b) => b !== keep);
+  for (const id of all.slice(0, Math.max(0, all.length - KEEP_BACKUPS))) removeBackup(w, id);
 }
-function removeBackup(root, id) {
+function removeBackup(w, id) {
   for (const suffix of [".settings.local.json", ".state.json"]) {
     try {
-      fs6.unlinkSync(path6.join(backupDir(root), id + suffix));
+      fs7.unlinkSync(path7.join(backupDir(w), id + suffix));
     } catch {
     }
   }
 }
-function restoreBackup(root, id, ops = realOps) {
-  const dir = backupDir(root);
-  const st = JSON.parse(fs6.readFileSync(path6.join(dir, `${id}.state.json`), "utf8"));
-  const file = localSettingsPath(root);
-  if (st.settingsExisted) atomicWrite(file, fs6.readFileSync(path6.join(dir, `${id}.settings.local.json`)), ops);
-  else if (fs6.existsSync(file)) fs6.unlinkSync(file);
-  if (st.applied) writeJson(appliedPath(root), st.applied);
+function restoreBackup(w, id, ops = realOps) {
+  const dir = backupDir(w);
+  const st = JSON.parse(fs7.readFileSync(path7.join(dir, `${id}.state.json`), "utf8"));
+  const file = T(w).file;
+  if (st.settingsExisted) atomicWrite(file, fs7.readFileSync(path7.join(dir, `${id}.settings.local.json`)), ops);
+  else if (fs7.existsSync(file)) fs7.unlinkSync(file);
+  if (st.applied) writeJson(appliedPath(w), st.applied);
   else try {
-    fs6.unlinkSync(appliedPath(root));
+    fs7.unlinkSync(appliedPath(w));
   } catch {
   }
 }
-function writeSettings(root, action, mutate, ops = realOps) {
-  const file = localSettingsPath(root);
-  const raw = fs6.existsSync(file) ? fs6.readFileSync(file, "utf8") : void 0;
+function earlierBytes(w, settings) {
+  const want = JSON.stringify(settings);
+  for (const id of listBackups(w).reverse()) {
+    try {
+      const text = fs7.readFileSync(path7.join(backupDir(w), `${id}.settings.local.json`), "utf8");
+      if (JSON.stringify(JSON.parse(text)) === want) return text;
+    } catch {
+    }
+  }
+  return void 0;
+}
+function originallyAbsent(w, originalBackup) {
+  if (!originalBackup) return false;
+  const st = readJson(path7.join(backupDir(w), `${originalBackup}.state.json`));
+  return st?.settingsExisted === false;
+}
+function writeSettings(w, action, mutate, ops = realOps) {
+  const file = T(w).file;
+  const raw = fs7.existsSync(file) ? fs7.readFileSync(file, "utf8") : void 0;
   let settings = {};
   if (raw !== void 0 && raw.trim()) {
     try {
@@ -974,65 +1125,72 @@ function writeSettings(root, action, mutate, ops = realOps) {
       throw new Error(`${file} is not valid JSON (${e.message}); ctx won't overwrite it. Fix it first.`);
     }
   }
-  const applied = loadApplied(root);
-  const id = backup(root);
+  const applied = loadApplied(w);
+  const id = backup(w);
   if (!applied.originalBackup) applied.originalBackup = id;
   const changes = mutate(settings, applied);
   if (!changes.length) {
-    removeBackup(root, id);
+    removeBackup(w, id);
     if (applied.originalBackup === id) delete applied.originalBackup;
     return { backup: "", changes, file };
   }
-  const text = serialize(settings, detectStyle(raw));
-  try {
-    atomicWrite(file, text, ops);
-    JSON.parse(fs6.readFileSync(file, "utf8"));
-  } catch (e) {
+  if (!Object.keys(settings).length && originallyAbsent(w, applied.originalBackup)) {
+    if (fs7.existsSync(file)) fs7.unlinkSync(file);
+    delete applied.lastWrittenHash;
+  } else {
+    const text = earlierBytes(w, settings) ?? serialize(settings, detectStyle(raw));
     try {
-      restoreBackup(root, id);
-    } catch {
+      atomicWrite(file, text, ops);
+      JSON.parse(fs7.readFileSync(file, "utf8"));
+    } catch (e) {
+      try {
+        restoreBackup(w, id);
+      } catch {
+      }
+      throw new Error(`write failed, original restored: ${e.message}`);
     }
-    throw new Error(`write failed, original restored: ${e.message}`);
+    applied.lastWrittenHash = sha(text);
   }
-  applied.lastWrittenHash = sha(text);
   applied.history.push({ at: (/* @__PURE__ */ new Date()).toISOString(), action, backup: id, summary: changes.join("; ").slice(0, 500) });
-  writeJson(appliedPath(root), applied);
-  pruneBackups(root, applied.originalBackup);
+  applied.history = applied.history.slice(-200);
+  writeJson(appliedPath(w), applied);
+  pruneBackups(w, applied.originalBackup);
   return { backup: id, changes, file };
 }
-function editedSinceWrite(root, applied) {
-  const file = localSettingsPath(root);
+function editedSinceWrite(w, applied) {
+  const file = T(w).file;
   if (!applied.lastWrittenHash) return false;
-  if (!fs6.existsSync(file)) return true;
-  return sha(fs6.readFileSync(file, "utf8")) !== applied.lastWrittenHash;
+  if (!fs7.existsSync(file)) return true;
+  return sha(fs7.readFileSync(file, "utf8")) !== applied.lastWrittenHash;
 }
-function undo(root, all = false, ops = realOps) {
-  const applied = loadApplied(root);
-  const backups = listBackups(root);
+function undo(w, all = false, ops = realOps) {
+  const applied = loadApplied(w);
+  const backups = listBackups(w);
   if (!backups.length) throw new Error("nothing to undo: ctx has no backups for this project");
   const target = all ? applied.originalBackup ?? backups[0] : backups[backups.length - 1];
   let manual;
-  if (editedSinceWrite(root, applied)) {
-    const dir = backupDir(root);
+  if (editedSinceWrite(w, applied)) {
+    const dir = backupDir(w);
     manual = `${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.pre-undo.settings.local.json`;
-    const file2 = localSettingsPath(root);
-    if (fs6.existsSync(file2)) fs6.copyFileSync(file2, path6.join(dir, manual));
+    const file2 = T(w).file;
+    if (fs7.existsSync(file2)) fs7.copyFileSync(file2, path7.join(dir, manual));
   }
-  restoreBackup(root, target, ops);
-  const st = JSON.parse(fs6.readFileSync(path6.join(backupDir(root), `${target}.state.json`), "utf8"));
+  restoreBackup(w, target, ops);
+  const st = JSON.parse(fs7.readFileSync(path7.join(backupDir(w), `${target}.state.json`), "utf8"));
   const original = applied.originalBackup;
-  for (const b of backups.filter((b2) => b2 >= target)) if (b !== original) removeBackup(root, b);
-  const after = loadApplied(root);
-  const file = localSettingsPath(root);
-  after.lastWrittenHash = fs6.existsSync(file) ? sha(fs6.readFileSync(file, "utf8")) : void 0;
+  for (const b of backups.filter((b2) => b2 >= target)) if (b !== original) removeBackup(w, b);
+  const after = loadApplied(w);
+  const file = T(w).file;
+  after.lastWrittenHash = fs7.existsSync(file) ? sha(fs7.readFileSync(file, "utf8")) : void 0;
   after.originalBackup = original;
   if (all) {
     after.owned = emptyEntries();
     after.preexisting = emptyEntries();
     delete after.verified;
+    delete after.replaced;
   }
   after.history = [...applied.history, { at: (/* @__PURE__ */ new Date()).toISOString(), action: all ? "undo all" : "undo", backup: target, summary: `restored ${target}` }];
-  writeJson(appliedPath(root), after);
+  writeJson(appliedPath(w), after);
   return { restored: target, manualEditsSaved: manual, deleted: !st.settingsExisted };
 }
 var isObj2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
@@ -1065,14 +1223,17 @@ function cleanupEmpty(s) {
   for (const k of ["enabledPlugins", "skillOverrides"]) if (isObj2(s[k]) && !Object.keys(s[k]).length) delete s[k];
   if (Array.isArray(s.disabledMcpjsonServers) && !s.disabledMcpjsonServers.length) delete s.disabledMcpjsonServers;
 }
+function isKeepOn(r) {
+  return r.kind === "plugin" && r.value === true || r.kind === "skill" && r.level === "on";
+}
 function describeRef(r) {
   if (r.kind === "allow") return `allow ${r.rule}`;
   if (r.kind === "tool") return `deny ${r.name}`;
-  if (r.kind === "plugin") return `plugin ${r.id} off`;
-  if (r.kind === "skill") return `skill ${r.name} ${r.level}`;
+  if (r.kind === "plugin") return r.value ? `plugin ${r.id} on (override)` : `plugin ${r.id} off`;
+  if (r.kind === "skill") return r.level === "on" ? `skill ${r.name} on (override)` : `skill ${r.name} ${r.level}`;
   return `.mcp.json server ${r.name} off`;
 }
-function setEntry(s, a, r) {
+function setEntry(s, a, r, opts = {}) {
   if (r.kind === "allow") {
     const allow = permList(s, "allow", true);
     if (allow.includes(r.rule)) {
@@ -1094,23 +1255,40 @@ function setEntry(s, a, r) {
     return describeRef(r);
   }
   if (r.kind === "plugin") {
+    const v = r.value ?? false;
     const ep = objKey(s, "enabledPlugins", true);
-    if (ep[r.id] === false) {
-      if (!(r.id in a.owned.plugins)) a.preexisting.plugins[r.id] = false;
+    if (ep[r.id] === v) {
+      if (!(r.id in a.owned.plugins)) a.preexisting.plugins[r.id] = v;
+      else a.owned.plugins[r.id] = v;
       return void 0;
     }
-    if (r.id in ep && !(r.id in a.owned.plugins)) return `skipped plugin ${r.id}: set to ${String(ep[r.id])} by you`;
-    ep[r.id] = false;
-    a.owned.plugins[r.id] = false;
+    if (r.id in ep && !(r.id in a.owned.plugins)) {
+      if (!opts.replace?.(ep[r.id])) {
+        cleanupEmpty(s);
+        return `skipped plugin ${r.id}: set to ${String(ep[r.id])} by you`;
+      }
+      (a.replaced ??= {})[refKey(r)] = ep[r.id];
+      delete a.preexisting.plugins[r.id];
+    }
+    ep[r.id] = v;
+    a.owned.plugins[r.id] = v;
     return describeRef(r);
   }
   if (r.kind === "skill") {
     const so = objKey(s, "skillOverrides", true);
     if (so[r.name] === r.level) {
       if (!(r.name in a.owned.skills)) a.preexisting.skills[r.name] = r.level;
+      else a.owned.skills[r.name] = r.level;
       return void 0;
     }
-    if (r.name in so && !(r.name in a.owned.skills)) return `skipped skill ${r.name}: set to "${String(so[r.name])}" by you`;
+    if (r.name in so && !(r.name in a.owned.skills)) {
+      if (!opts.replace?.(so[r.name])) {
+        cleanupEmpty(s);
+        return `skipped skill ${r.name}: set to "${String(so[r.name])}" by you`;
+      }
+      (a.replaced ??= {})[refKey(r)] = so[r.name];
+      delete a.preexisting.skills[r.name];
+    }
     so[r.name] = r.level;
     a.owned.skills[r.name] = r.level;
     return describeRef(r);
@@ -1129,6 +1307,12 @@ function clearEntry(s, a, r, force = false) {
   const drop = (arr, v) => {
     const i = arr.indexOf(v);
     if (i >= 0) arr.splice(i, 1);
+  };
+  const restore = (obj, key, rk) => {
+    if (a.replaced && rk in a.replaced) {
+      obj[key] = a.replaced[rk];
+      delete a.replaced[rk];
+    } else delete obj[key];
   };
   let result = "absent";
   if (r.kind === "allow") {
@@ -1153,9 +1337,10 @@ function clearEntry(s, a, r, force = false) {
     }
   } else if (r.kind === "plugin") {
     const ep = objKey(s, "enabledPlugins", false);
-    if (ep && ep[r.id] === false) {
-      if (r.id in a.owned.plugins || force) {
-        delete ep[r.id];
+    const v = r.value ?? false;
+    if (ep && ep[r.id] === v) {
+      if (a.owned.plugins[r.id] === v || force) {
+        restore(ep, r.id, refKey(r));
         delete a.owned.plugins[r.id];
         delete a.preexisting.plugins[r.id];
         result = "removed";
@@ -1163,9 +1348,10 @@ function clearEntry(s, a, r, force = false) {
     }
   } else if (r.kind === "skill") {
     const so = objKey(s, "skillOverrides", false);
-    if (so && r.name in so && so[r.name] !== "on") {
-      if (r.name in a.owned.skills || force) {
-        delete so[r.name];
+    const match = (v) => r.level === "on" ? v === "on" : v !== void 0 && v !== "on";
+    if (so && r.name in so && match(so[r.name])) {
+      if (r.name in a.owned.skills && match(a.owned.skills[r.name]) || force) {
+        restore(so, r.name, refKey(r));
         delete a.owned.skills[r.name];
         delete a.preexisting.skills[r.name];
         result = "removed";
@@ -1187,7 +1373,7 @@ function clearEntry(s, a, r, force = false) {
 function ownedRefs(a) {
   return [
     ...a.owned.deny.map((name) => ({ kind: "tool", name })),
-    ...Object.keys(a.owned.plugins).map((id) => ({ kind: "plugin", id })),
+    ...Object.entries(a.owned.plugins).map(([id, value]) => ({ kind: "plugin", id, ...value ? { value } : {} })),
     ...Object.entries(a.owned.skills).map(([name, level]) => ({ kind: "skill", name, level })),
     ...a.owned.mcpjson.map((name) => ({ kind: "mcpjson", name })),
     ...a.owned.allow.map((rule) => ({ kind: "allow", rule }))
@@ -1195,7 +1381,22 @@ function ownedRefs(a) {
 }
 function refKey(r) {
   if (r.kind === "allow") return `allow:${r.rule}`;
-  return r.kind === "plugin" ? `plugin:${r.id}` : r.kind === "mcpjson" ? `mcpjson:${r.name}` : `${r.kind}:${r.name}`;
+  if (r.kind === "plugin") return r.value ? `plugin-on:${r.id}` : `plugin:${r.id}`;
+  if (r.kind === "skill") return r.level === "on" ? `skill-on:${r.name}` : `skill:${r.name}`;
+  return r.kind === "mcpjson" ? `mcpjson:${r.name}` : `${r.kind}:${r.name}`;
+}
+function refFromKey(k) {
+  const i = k.indexOf(":");
+  const kind = k.slice(0, i);
+  const name = k.slice(i + 1);
+  if (kind === "tool") return { kind: "tool", name };
+  if (kind === "plugin") return { kind: "plugin", id: name };
+  if (kind === "plugin-on") return { kind: "plugin", id: name, value: true };
+  if (kind === "skill") return { kind: "skill", name, level: "name-only" };
+  if (kind === "skill-on") return { kind: "skill", name, level: "on" };
+  if (kind === "mcpjson") return { kind: "mcpjson", name };
+  if (kind === "allow") return { kind: "allow", rule: name };
+  return void 0;
 }
 var ENABLE_RULE = "Skill(ctx:enable)";
 function driftedEntries(settings, a) {
@@ -1203,7 +1404,7 @@ function driftedEntries(settings, a) {
   const deny = isObj2(settings.permissions) && Array.isArray(settings.permissions.deny) ? settings.permissions.deny : [];
   for (const t of a.owned.deny) if (!deny.includes(t)) out.push(`tool:${t}`);
   const ep = isObj2(settings.enabledPlugins) ? settings.enabledPlugins : {};
-  for (const p of Object.keys(a.owned.plugins)) if (ep[p] !== false) out.push(`plugin:${p}`);
+  for (const [p, v] of Object.entries(a.owned.plugins)) if (ep[p] !== v) out.push(`plugin:${p}`);
   const so = isObj2(settings.skillOverrides) ? settings.skillOverrides : {};
   for (const [k, v] of Object.entries(a.owned.skills)) if (so[k] !== v) out.push(`skill:${k}`);
   return out;
@@ -1239,7 +1440,7 @@ function renderDoctor(root) {
   if (bin) out.push(`  claude binary: ${bin.path}  (v${bin.version}, via ${bin.source})`);
   else {
     out.push("  claude binary: NOT FOUND. Set CTX_CLAUDE_BIN to the full path of claude(.exe). Checked:");
-    for (const c of candidates()) out.push(`    - ${c.path} (${c.source})${fs7.existsSync(c.path) ? " [exists, --version failed]" : ""}`);
+    for (const c of candidates()) out.push(`    - ${c.path} (${c.source})${fs8.existsSync(c.path) ? " [exists, --version failed]" : ""}`);
   }
   out.push("  settings files:");
   const scopes = loadScopes(root);
@@ -1250,7 +1451,7 @@ function renderDoctor(root) {
   const dirs = transcriptDirs(root);
   out.push(`  transcript dirs: ${dirs.length ? "" : "none found"}`);
   for (const d of dirs) {
-    const n = fs7.readdirSync(d).filter((f) => f.endsWith(".jsonl")).length;
+    const n = fs8.readdirSync(d).filter((f) => f.endsWith(".jsonl")).length;
     out.push(`    ${d}  (${n} sessions)`);
   }
   const cj = readJson(claudeJsonPath());
@@ -1273,17 +1474,17 @@ function renderDoctor(root) {
 }
 
 // src/protect.ts
-import fs8 from "node:fs";
-import path7 from "node:path";
+import fs9 from "node:fs";
+import path8 from "node:path";
 var ALWAYS = ["Read", "Edit", "Write", "Glob", "Grep", "Skill", "ToolSearch", "AskUserQuestion", "EndConversation"];
 function claudeMdMentions(word) {
-  for (const f of [path7.join(claudeDir(), "CLAUDE.md")]) {
+  for (const f of [path8.join(claudeDir(), "CLAUDE.md")]) {
     try {
-      const text = fs8.readFileSync(f, "utf8");
+      const text = fs9.readFileSync(f, "utf8");
       if (text.includes(word)) return true;
       for (const m of text.matchAll(/^@(\S+)/gm)) {
         try {
-          if (fs8.readFileSync(path7.resolve(path7.dirname(f), m[1]), "utf8").includes(word)) return true;
+          if (fs9.readFileSync(path8.resolve(path8.dirname(f), m[1]), "utf8").includes(word)) return true;
         } catch {
         }
       }
@@ -1413,11 +1614,11 @@ function renderReport(root, m, ledger) {
 
 // src/commands.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
-import fs9 from "node:fs";
-import path10 from "node:path";
+import fs10 from "node:fs";
+import path11 from "node:path";
 
 // src/plan.ts
-import path9 from "node:path";
+import path10 from "node:path";
 
 // src/deps.json
 var deps_default = {
@@ -1428,9 +1629,9 @@ var deps_default = {
 };
 
 // src/profile.ts
-import path8 from "node:path";
+import path9 from "node:path";
 function profilePath(root) {
-  return path8.join(projectStateDir(root), "project-profile.json");
+  return path9.join(projectStateDir(root), "project-profile.json");
 }
 function loadProfile(root) {
   return readJson(profilePath(root));
@@ -1476,7 +1677,7 @@ function profileKeywords(p) {
 // src/plan.ts
 var DEPS = deps_default;
 function planPath(root) {
-  return path9.join(projectStateDir(root), "plan.json");
+  return path10.join(projectStateDir(root), "plan.json");
 }
 function loadPlan(root) {
   return readJson(planPath(root));
@@ -1762,7 +1963,7 @@ function refsForPlan(plan, groups) {
 }
 function gitIgnoreStatus(root) {
   try {
-    const r = spawnSync2("git", ["-C", root, "check-ignore", "-q", path10.join(".claude", "settings.local.json")], {
+    const r = spawnSync2("git", ["-C", root, "check-ignore", "-q", path11.join(".claude", "settings.local.json")], {
       shell: false,
       windowsHide: true,
       stdio: "ignore",
@@ -1776,11 +1977,11 @@ function gitIgnoreStatus(root) {
 function addGitExclude(root) {
   const r = spawnSync2("git", ["-C", root, "rev-parse", "--git-path", "info/exclude"], { shell: false, encoding: "utf8", windowsHide: true });
   if (r.status !== 0) return false;
-  const file = path10.resolve(root, r.stdout.trim());
-  fs9.mkdirSync(path10.dirname(file), { recursive: true });
-  const cur = fs9.existsSync(file) ? fs9.readFileSync(file, "utf8") : "";
+  const file = path11.resolve(root, r.stdout.trim());
+  fs10.mkdirSync(path11.dirname(file), { recursive: true });
+  const cur = fs10.existsSync(file) ? fs10.readFileSync(file, "utf8") : "";
   if (!cur.split(/\r?\n/).includes(".claude/settings.local.json")) {
-    fs9.appendFileSync(file, `${cur && !cur.endsWith("\n") ? "\n" : ""}.claude/settings.local.json
+    fs10.appendFileSync(file, `${cur && !cur.endsWith("\n") ? "\n" : ""}.claude/settings.local.json
 `);
   }
   return true;
@@ -1797,7 +1998,7 @@ function allowEnable(root, remove, out) {
   return 0;
 }
 async function apply(root, opts, out) {
-  const plan = opts.planFile ? readJson(path10.resolve(opts.planFile)) : loadPlan(root);
+  const plan = opts.planFile ? readJson(path11.resolve(opts.planFile)) : loadPlan(root);
   if (!plan) {
     out("No plan yet. Run: ctx plan");
     return 2;
@@ -1814,7 +2015,7 @@ async function apply(root, opts, out) {
     const changes = [];
     const pinned = new Set(a.pinnedOff ?? []);
     for (const r of ownedRefs(a)) {
-      if (r.kind === "allow" || desiredKeys.has(refKey(r)) || pinned.has(refKey(r))) continue;
+      if (r.kind === "allow" || isKeepOn(r) || desiredKeys.has(refKey(r)) || pinned.has(refKey(r))) continue;
       if (clearEntry(s, a, r) === "removed") changes.push(`removed ${describeRef(r)} (no longer planned)`);
     }
     for (const r of desired) {
@@ -1828,7 +2029,7 @@ async function apply(root, opts, out) {
     return changes;
   };
   if (!opts.yes) {
-    const settings = readJson(path10.join(root, ".claude", "settings.local.json")) ?? {};
+    const settings = readJson(path11.join(root, ".claude", "settings.local.json")) ?? {};
     const changes = mutation(JSON.parse(JSON.stringify(settings)), JSON.parse(JSON.stringify(loadApplied(root))));
     out(`Dry run (groups: ${groups.join(", ")}). ${changes.length} change(s) to .claude/settings.local.json:`);
     for (const c of changes) out(`  ${c}`);
@@ -1965,13 +2166,42 @@ function on(root, query, opts, out) {
   const scopes = loadScopes(root);
   const where = ref.kind === "tool" ? findRule(scopes, "deny", ref.name) : ref.kind === "plugin" ? findRule(scopes, "plugin", ref.id) : ref.kind === "skill" ? findRule(scopes, "skill", ref.name) : [];
   const other = where.filter((s) => s.scope !== "local");
+  const key = ref.kind === "tool" ? `permissions.deny "${ref.name}"` : ref.kind === "plugin" ? `enabledPlugins["${ref.id}"]` : ref.kind === "skill" ? `skillOverrides["${ref.name}"]` : "";
+  const overridable = other.filter((s) => s.scope === "user" || s.scope === "project");
+  if ((ref.kind === "plugin" || ref.kind === "skill") && overridable.length && !other.some((s) => s.scope === "managed")) {
+    const keep = ref.kind === "plugin" ? { kind: "plugin", id: ref.id, value: true } : { kind: "skill", name: ref.name, level: "on" };
+    let skipped;
+    const w = writeSettings(root, `on ${id}`, (s, a) => {
+      const c = setEntry(s, a, keep);
+      if (c?.startsWith("skipped")) {
+        skipped = c;
+        return [];
+      }
+      return c ? [c] : [];
+    });
+    if (skipped) {
+      out(`${skipped}. ${id} stays as you set it in ${w.file}.`);
+      return 1;
+    }
+    const src = overridable[0];
+    const byCtx = src.scope === "user" && key && isGlobalOwned(ref);
+    out(`${id} is switched off in ${src.path} (${src.scope} settings${byCtx ? ", by ctx global" : ""}), key ${key}. ` + (w.changes.length ? `Added a project-local override in ${w.file} (backup ${w.backup}), so it is on in this project only.` : `This project already overrides it locally.`));
+    for (const l of howItApplies(id, m)) out(l);
+    if (w.changes.length) recordReenable(root, id, opts.reason);
+    return 0;
+  }
   if (other.length) {
-    const key = ref.kind === "tool" ? `permissions.deny "${ref.name}"` : ref.kind === "plugin" ? `enabledPlugins["${ref.id}"]` : ref.kind === "skill" ? `skillOverrides["${ref.name}"]` : "";
     for (const s of other) out(`${id} is switched off in ${s.path} (${s.scope} settings), key ${key}. ctx doesn't edit that file; change it there.`);
     return 1;
   }
   out(`${id} is already on.`);
   return 0;
+}
+function isGlobalOwned(ref) {
+  const g = loadApplied(globalTarget());
+  if (ref.kind === "plugin") return g.owned.plugins[ref.id] === false;
+  if (ref.kind === "skill") return ref.name in g.owned.skills;
+  return false;
 }
 function off(root, query, opts, out) {
   const id = resolveOrExplain(root, query, out);
@@ -2029,23 +2259,534 @@ function undo2(root, all, out) {
 
 // src/hook.ts
 import { spawn as spawn2 } from "node:child_process";
-import fs10 from "node:fs";
+import fs12 from "node:fs";
+
+// src/global.ts
+import path12 from "node:path";
+var isObj3 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+var nameOf2 = (id) => id.slice(id.indexOf(":") + 1);
+var GLOBAL_SKILL_SOURCES = /* @__PURE__ */ new Set(["Built-in", "claude.ai sync", "User"]);
+function globalPlanPath() {
+  return path12.join(ctxHome(), "global", "plan.json");
+}
+function loadGlobalPlan() {
+  return readJson(globalPlanPath());
+}
+function projectUses(l, id, keep = []) {
+  if (keep.includes(id)) return true;
+  if (!l) return false;
+  if ((l.reenables[id]?.length ?? 0) > 0) return true;
+  if (id.startsWith("plugin:")) {
+    const p = nameOf2(id).split("@")[0];
+    return Object.entries(l.items).some(([k, u]) => u.sessionsUsed > 0 && (k.startsWith(`skill:${p}:`) || k.startsWith(`agent:${p}:`) || k.startsWith(`mcp:plugin_${p}_`)));
+  }
+  return (l.items[id]?.sessionsUsed ?? 0) > 0;
+}
+function userPlugins() {
+  const out = {};
+  const inst = readJson(path12.join(claudeDir(), "plugins", "installed_plugins.json"));
+  for (const [id, installs] of Object.entries(inst?.plugins ?? {})) if (installs.some((i) => i.scope === "user")) out[id] = true;
+  const us = readJson(path12.join(claudeDir(), "settings.json"));
+  if (isObj3(us?.enabledPlugins)) {
+    for (const [id, v] of Object.entries(us.enabledPlugins)) if (typeof v === "boolean") out[id] = v;
+  }
+  return out;
+}
+async function buildGlobalPlan(opts = {}, found) {
+  const window = opts.sessions ?? 10;
+  const days = opts.days ?? 90;
+  const share = opts.share ?? 0.5;
+  const min = opts.minTokens ?? 200;
+  const since = new Date(Date.now() - days * 864e5).toISOString();
+  const projects = (found ?? await discoverProjects()).filter((p) => p.exists);
+  const g = loadApplied(globalTarget());
+  const prev = loadGlobalPlan();
+  const notes = [];
+  const cost = /* @__PURE__ */ new Map();
+  const skillSources = /* @__PURE__ */ new Map();
+  const bump = (id, v) => {
+    if (v !== void 0) cost.set(id, Math.max(cost.get(id) ?? 0, v));
+  };
+  for (const p of projects) {
+    const m = loadMeasurement(p.root);
+    if (!m) continue;
+    for (const [id, it] of Object.entries(m.items)) {
+      if (it.unmeasured) continue;
+      if (it.kind === "plugin") bump(id, it.deltaTokens);
+      if (it.kind === "skill" && GLOBAL_SKILL_SOURCES.has(it.source ?? "")) {
+        bump(id, it.softDeltaTokens ?? 0);
+        skillSources.set(id, it.source ?? "");
+      }
+    }
+  }
+  for (const it of prev?.items ?? []) if (!cost.has(it.id) && it.tokens !== void 0) cost.set(it.id, it.tokens);
+  const ids = /* @__PURE__ */ new Set();
+  const plugins = userPlugins();
+  for (const id of Object.keys(plugins)) ids.add(`plugin:${id}`);
+  for (const id of Object.keys(g.owned.plugins)) ids.add(`plugin:${id}`);
+  for (const id of skillSources.keys()) ids.add(id);
+  for (const s of Object.keys(g.owned.skills)) ids.add(`skill:${s}`);
+  const uses = [];
+  for (const p of projects) {
+    const l = p.dirs.length ? await scanLedger(p.root, { dirs: p.dirs, sessions: window }) : void 0;
+    const keep = loadProfile(p.root)?.keep ?? [];
+    uses.push({
+      key: p.key,
+      root: p.root,
+      lastActive: p.lastActive,
+      sessions: l?.sessions.length ?? 0,
+      active: !!p.lastActive && p.lastActive >= since && (l?.sessions.length ?? 0) > 0,
+      exists: p.exists,
+      registered: p.registered,
+      uses: [...ids].filter((id) => projectUses(l, id, keep))
+    });
+  }
+  const active = uses.filter((u) => u.active);
+  const counters = readGlobalCounters();
+  const descs = pluginDescriptions();
+  const userSettings = readJson(path12.join(claudeDir(), "settings.json")) ?? {};
+  const userSkills = isObj3(userSettings.skillOverrides) ? userSettings.skillOverrides : {};
+  const items = [];
+  for (const id of ids) {
+    const kind = id.startsWith("plugin:") ? "plugin" : "skill";
+    const name = nameOf2(id);
+    const usedBy = uses.filter((u) => u.uses.includes(id));
+    const activeUsers = usedBy.filter((u) => u.active);
+    const tokens = cost.get(id);
+    const item = {
+      id,
+      kind,
+      tokens,
+      usedIn: usedBy.map((u) => u.key),
+      keepOn: [],
+      class: "negligible",
+      action: "none",
+      reason: "",
+      ...kind === "plugin" && descs[name] ? { description: firstSentence(descs[name]) } : {}
+    };
+    const set = (c, reason, action = "none") => Object.assign(item, { class: c, reason, action });
+    const offAction = kind === "plugin" ? "off" : "soft";
+    const ownedByCtx = kind === "plugin" ? g.owned.plugins[name] === false : name in g.owned.skills;
+    if (kind === "plugin" && name.split("@")[0] === "ctx") set("protected", "ctx itself (its hooks must run everywhere)");
+    else if (kind === "plugin" && plugins[name] === false && !ownedByCtx) set("user-set", "off in your user settings");
+    else if (kind === "skill" && name in userSkills && !ownedByCtx) set("user-set", `set to "${String(userSkills[name])}" in your user settings`);
+    else if (tokens !== void 0 && tokens < (kind === "plugin" ? min : min / 4)) set("negligible", `${fmtK1(tokens)} per session`);
+    else if (!usedBy.length) {
+      const c = kind === "plugin" ? counters.pluginUsage[name] : counters.skillUsage[name] ?? counters.skillUsage[`anthropic-skills:${name}`];
+      const last = c?.lastUsedAt ? new Date(c.lastUsedAt).toISOString() : "";
+      if (last && last >= since) set("elsewhere", `used ${last.slice(0, 10)} in a session ctx can't map to a project`);
+      else set("unused", `not used in any of ${uses.length} projects`, offAction);
+    } else if (activeUsers.length > share * active.length) {
+      set("common", `used in ${activeUsers.length} of ${active.length} active projects`);
+    } else {
+      set("extra", `used only in ${usedBy.map((u) => shortName(u.key)).join(", ")}`, offAction);
+      item.keepOn = usedBy.map((u) => u.root);
+    }
+    items.push(item);
+  }
+  if (active.length < 2) notes.push(`Only ${active.length} active project${active.length === 1 ? "" : "s"}: per-project trimming (/ctx:setup) does more than a global baseline.`);
+  if (!cost.size) notes.push("No project has been measured yet, so costs are unknown. Run /ctx:setup (or ctx measure) in a project first.");
+  const unmeasured = items.filter((i) => i.action !== "none" && i.tokens === void 0);
+  if (unmeasured.length) notes.push(`Unmeasured: ${unmeasured.map((i) => nameOf2(i.id)).join(", ")} (cost unknown; measure a project that loads them).`);
+  const plan = {
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    windowSessions: window,
+    activeDays: days,
+    share,
+    projects: uses,
+    items: items.sort((a, b) => (b.tokens ?? 0) - (a.tokens ?? 0) || a.id.localeCompare(b.id)),
+    notes
+  };
+  writeJson(globalPlanPath(), plan);
+  return plan;
+}
+function shortName(key) {
+  const parts = key.split("/");
+  return parts[parts.length - 1] || key;
+}
+function renderGlobalPlan(plan) {
+  const out = [];
+  const active = plan.projects.filter((p) => p.active);
+  out.push(`ctx global: ${active.length} active project${active.length === 1 ? "" : "s"} (session in the last ${plan.activeDays} days), ${plan.windowSessions} sessions each`);
+  for (const p of plan.projects) {
+    out.push(`  ${p.key.padEnd(48).slice(0, 48)} ${String(p.sessions).padStart(3)} sessions  last ${p.lastActive?.slice(0, 10) ?? "-"}${p.registered ? "  profiled" : ""}${p.active ? "" : "  (inactive)"}`);
+  }
+  out.push("");
+  const trims = plan.items.filter((i) => i.action !== "none");
+  const plug = trims.filter((i) => i.kind === "plugin");
+  const sk = trims.filter((i) => i.kind === "skill");
+  const line = (i) => `  ${i.id.padEnd(34)} ${(i.tokens === void 0 ? "?" : fmtK1(i.tokens)).padStart(6)}  ${i.action.padEnd(4)}  ${i.reason}`.slice(0, 100);
+  if (plug.length) {
+    out.push("[plugins] Off in user settings; on again in the projects that use them");
+    for (const i of plug) out.push(line(i));
+    out.push("");
+  }
+  if (sk.length) {
+    out.push("[skills] Name-only in user settings (still callable by name); fully on where used");
+    for (const i of sk) out.push(line(i));
+    out.push("");
+  }
+  if (!trims.length) out.push("Nothing to change: every plugin and skill is used widely, already off, or too small to matter.");
+  const keep = plan.items.filter((i) => i.action === "none" && i.class !== "negligible");
+  if (keep.length) out.push(wrapJoin("Left alone: ", keep.map((i) => `${nameOf2(i.id).split("@")[0]} (${i.class})`)));
+  for (const n of plan.notes) out.push(`Note: ${n}`);
+  const keepOns = trims.reduce((a, i) => a + i.keepOn.length, 0);
+  out.push(`Writes ~/.claude/settings.json${keepOns ? ` and ${keepOns} keep-on override${keepOns === 1 ? "" : "s"} in project settings.local.json files` : ""}. Savings apply per new session in every project where the item is off.`);
+  return out.join("\n");
+}
+var keepRef = (i) => i.kind === "plugin" ? { kind: "plugin", id: nameOf2(i.id), value: true } : { kind: "skill", name: nameOf2(i.id), level: "on" };
+var offRef = (i) => i.kind === "plugin" ? { kind: "plugin", id: nameOf2(i.id) } : { kind: "skill", name: nameOf2(i.id), level: "name-only" };
+var idOfRef = (r) => r.kind === "plugin" ? `plugin:${r.id}` : r.kind === "skill" ? `skill:${r.name}` : "";
+function locallyTrimmed(s, i) {
+  const n = nameOf2(i.id);
+  if (i.kind === "plugin") return isObj3(s.enabledPlugins) && s.enabledPlugins[n] === false;
+  return isObj3(s.skillOverrides) && n in s.skillOverrides && s.skillOverrides[n] !== "on";
+}
+function applyGlobal(plan, opts, out) {
+  const unknown = (opts.items ?? []).filter((id) => !plan.items.some((i) => i.id === id));
+  if (unknown.length) {
+    out(`Not in the global plan: ${unknown.join(", ")}`);
+    return 2;
+  }
+  const chosen = plan.items.filter((i) => i.action !== "none" && (!opts.items || opts.items.includes(i.id)));
+  const gt = globalTarget();
+  const g = loadApplied(gt);
+  if (!opts.yes) {
+    const removals = ownedRefs(g).filter((r) => !chosen.some((i) => refKey(offRef(i)) === refKey(r)));
+    out(`Dry run. ~/.claude/settings.json: ${chosen.length} item(s) off or name-only${removals.length ? `, ${removals.length} earlier ctx entr${removals.length === 1 ? "y" : "ies"} removed` : ""}.`);
+    for (const i of chosen) out(`  ${describeRef(offRef(i))}${i.keepOn.length ? `; on in ${i.keepOn.map((r) => shortName(projectKey(r))).join(", ")}` : ""}`);
+    for (const r of removals) out(`  remove ${describeRef(r)} (no longer planned)`);
+    out("Run again with --yes to write them.");
+    return 0;
+  }
+  const failed = /* @__PURE__ */ new Set();
+  const projects = { ...g.projects ?? {} };
+  const byRoot = /* @__PURE__ */ new Map();
+  for (const i of chosen) for (const r of i.keepOn) byRoot.set(r, [...byRoot.get(r) ?? [], i]);
+  for (const [root, its] of byRoot) {
+    try {
+      const res2 = writeSettings(root, "global keep-on", (s, a) => {
+        const changes = [];
+        for (const i of its) {
+          if (locallyTrimmed(s, i)) continue;
+          const ref = keepRef(i);
+          const c = setEntry(s, a, ref);
+          if (c?.startsWith("skipped")) {
+            failed.add(i.id);
+            out(`${shortName(projectKey(root))}: ${c}; ${nameOf2(i.id)} stays on globally.`);
+            continue;
+          }
+          const owned = ref.kind === "plugin" ? a.owned.plugins[ref.id] === true : ref.kind === "skill" && a.owned.skills[ref.name] === "on";
+          if (owned) projects[root] = [.../* @__PURE__ */ new Set([...projects[root] ?? [], refKey(ref)])];
+          if (c) changes.push(c);
+        }
+        return changes;
+      });
+      if (res2.changes.length) out(`${projectKey(root)}: ${res2.changes.join("; ")}`);
+    } catch (e) {
+      for (const i of its) failed.add(i.id);
+      out(`${projectKey(root)}: ${e.message}. Leaving ${its.map((i) => nameOf2(i.id)).join(", ")} on globally.`);
+    }
+  }
+  const desired = chosen.filter((i) => !failed.has(i.id));
+  const desiredKeys = new Set(desired.map((i) => refKey(offRef(i))));
+  const res = writeSettings(gt, "global", (s, a) => {
+    const changes = [];
+    for (const r of ownedRefs(a)) {
+      if (desiredKeys.has(refKey(r))) continue;
+      if (clearEntry(s, a, r) === "removed") changes.push(`removed ${describeRef(r)}`);
+    }
+    for (const i of desired) {
+      const c = setEntry(s, a, offRef(i), { replace: (cur) => i.kind === "plugin" && cur === true });
+      if (c) changes.push(c);
+    }
+    return changes;
+  });
+  out(res.changes.length ? `${res.file}: ${res.changes.join("; ")} (backup ${res.backup})` : `${res.file}: already matches the plan.`);
+  const after = loadApplied(gt);
+  const offNow = new Set(ownedRefs(after).map(idOfRef));
+  pruneKeepOns(projects, (id) => !offNow.has(id), out);
+  after.projects = projects;
+  after.descriptions = Object.fromEntries(desired.filter((i) => i.description).map((i) => [i.id, i.description]));
+  writeJson(appliedPath(gt), after);
+  const saved = desired.reduce((a, i) => a + (i.tokens ?? 0), 0);
+  out(`Global baseline: ${desired.length} item(s) off or name-only, about ${fmtK1(saved)} less per new session in projects that don't use them.`);
+  out("Projects that use an item keep it through their local override. Start new sessions to see the effect; /ctx:global undo reverts.");
+  return 0;
+}
+function pruneKeepOns(projects, drop, out) {
+  for (const [root, keys] of Object.entries(projects)) {
+    const gone = keys.filter((k) => {
+      const r = refFromKey(k);
+      return r && drop(idOfRef(r));
+    });
+    if (!gone.length) continue;
+    try {
+      const res = writeSettings(root, "global prune", (s, a) => gone.flatMap((k) => {
+        const r = refFromKey(k);
+        return clearEntry(s, a, r) === "removed" ? [`removed ${describeRef(r)}`] : [];
+      }));
+      if (res.changes.length) out(`${projectKey(root)}: ${res.changes.join("; ")}`);
+      projects[root] = keys.filter((k) => !gone.includes(k));
+      if (!projects[root].length) delete projects[root];
+    } catch (e) {
+      out(`${projectKey(root)}: ${e.message}; left its overrides in place.`);
+    }
+  }
+}
+function undoGlobal(out) {
+  const gt = globalTarget();
+  const g = loadApplied(gt);
+  if (!ownedRefs(g).length && !Object.keys(g.projects ?? {}).length) {
+    out("ctx global has nothing to undo.");
+    return 0;
+  }
+  const res = writeSettings(gt, "global undo", (s, a) => ownedRefs(a).flatMap((r) => clearEntry(s, a, r) === "removed" ? [`restored ${describeRef(r).replace(/ (off|name-only)$/, "")}`] : []));
+  if (res.changes.length) out(`${res.file}: ${res.changes.join("; ")} (backup ${res.backup})`);
+  const projects = { ...g.projects ?? {} };
+  pruneKeepOns(projects, () => true, out);
+  const after = loadApplied(gt);
+  after.projects = projects;
+  after.descriptions = {};
+  writeJson(appliedPath(gt), after);
+  out(Object.keys(projects).length ? "Some project overrides could not be removed (see above)." : "Global baseline removed. New sessions load everything as before.");
+  return 0;
+}
+function globalOffHere(root) {
+  const g = readJson(appliedPath(globalTarget()));
+  const off2 = Object.entries(g?.owned?.plugins ?? {}).filter(([, v]) => v === false).map(([id]) => id);
+  if (!off2.length) return [];
+  const local = loadScopes(root).filter((s) => s.scope === "project" || s.scope === "local");
+  return off2.filter((id) => !local.some((s) => isObj3(s.data?.enabledPlugins) && s.data.enabledPlugins[id] === true)).map((id) => ({ id, description: g?.descriptions?.[`plugin:${id}`] ?? "" }));
+}
+
+// src/triggers.ts
+import fs11 from "node:fs";
+import path13 from "node:path";
+import readline3 from "node:readline";
+function configPath() {
+  return path13.join(ctxHome(), "config.json");
+}
+function loadConfig() {
+  return readJson(configPath()) ?? {};
+}
+function saveConfig(c) {
+  writeJson(configPath(), c);
+}
+function triggersPath() {
+  return path13.join(ctxHome(), "triggers.json");
+}
+function loadTriggers() {
+  return readJson(triggersPath());
+}
+var DEFAULT_THRESHOLD = 0.75;
+var STOP = new Set("the and for with that this from have has had was were are is be been being you your yours our ours they them their what when where which while who whom why how can could would should will shall may might must not but or nor so yet all any each few more most other some such only own same than too very just also into onto over under again then once here there out off about above below between both does did doing done make made use using used get got please thanks thank need want like let lets look see run add fix check now new one two its it's i'm dont don't file files code thing things way able sure okay yes no".split(/\s+/));
+function tokenize(text) {
+  const out = /* @__PURE__ */ new Set();
+  for (const raw of text.toLowerCase().match(/[a-z0-9][a-z0-9-]*[a-z0-9]/g) ?? []) {
+    for (const w of [raw, ...raw.includes("-") ? raw.split("-") : []]) {
+      if (w.length >= 3 && !STOP.has(w) && !/^\d+$/.test(w)) out.add(w);
+    }
+  }
+  return [...out];
+}
+function pluginIndex() {
+  const out = /* @__PURE__ */ new Map();
+  const inst = readJson(path13.join(claudeDir(), "plugins", "installed_plugins.json"));
+  for (const [id, installs] of Object.entries(inst?.plugins ?? {})) {
+    const name = id.split("@")[0];
+    const skills = /* @__PURE__ */ new Set();
+    for (const i of installs) {
+      try {
+        for (const d of fs11.readdirSync(path13.join(i.installPath ?? "", "skills"))) skills.add(d.toLowerCase());
+      } catch {
+      }
+    }
+    out.set(name, { id, skills: [...skills] });
+  }
+  return out;
+}
+function triggerItems(name, input, plugins) {
+  const out = /* @__PURE__ */ new Set();
+  for (const id of itemsForToolUse(name, input)) {
+    if (id.startsWith("tool:")) out.add(id);
+    else if (id.startsWith("skill:") || id.startsWith("agent:")) {
+      const rest = id.slice(id.indexOf(":") + 1);
+      const i = rest.indexOf(":");
+      if (i > 0) {
+        const p = plugins.get(rest.slice(0, i));
+        if (p) out.add(`plugin:${p.id}`);
+      } else if (id.startsWith("skill:")) out.add(id);
+    } else if (id.startsWith("mcp:plugin_")) {
+      const p = [...plugins.keys()].find((n) => id.startsWith(`mcp:plugin_${n}_`));
+      if (p) out.add(`plugin:${plugins.get(p).id}`);
+    }
+  }
+  return [...out];
+}
+function promptText(j) {
+  if (j.type !== "user" || j.isMeta) return void 0;
+  const c = j.message?.content;
+  const texts = typeof c === "string" ? [c] : Array.isArray(c) ? c.filter((b) => b?.type === "text").map((b) => b.text ?? "") : [];
+  if (!texts.length) return void 0;
+  let t = texts.join("\n");
+  const args = t.match(/<command-args>([\s\S]*?)<\/command-args>/);
+  if (/<command-name>/.test(t)) t = args?.[1] ?? "";
+  else if (/^\s*<(local-command|system-reminder|bash-|task-notification)/.test(t)) return void 0;
+  t = t.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "");
+  return t.trim() ? t : void 0;
+}
+async function scanSession(file, plugins, into) {
+  const rl = readline3.createInterface({ input: fs11.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+  let words;
+  let used = /* @__PURE__ */ new Set();
+  const flush = () => {
+    if (!words) return;
+    into.prompts++;
+    for (const w of words) into.df.set(w, (into.df.get(w) ?? 0) + 1);
+    for (const id of used) {
+      const it = into.items.get(id) ?? { prompts: 0, words: /* @__PURE__ */ new Map() };
+      it.prompts++;
+      for (const w of words) it.words.set(w, (it.words.get(w) ?? 0) + 1);
+      into.items.set(id, it);
+    }
+  };
+  for await (const line of rl) {
+    if (!line.includes('"user"') && !line.includes('"assistant"')) continue;
+    let j;
+    try {
+      j = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (j.isSidechain) continue;
+    if (j.type === "user") {
+      const t = promptText(j);
+      if (t === void 0) continue;
+      flush();
+      words = tokenize(t);
+      used = /* @__PURE__ */ new Set();
+    } else if (j.type === "assistant" && words && Array.isArray(j.message?.content)) {
+      for (const c of j.message.content) {
+        if (c?.type === "tool_use" && typeof c.name === "string") for (const id of triggerItems(c.name, c.input, plugins)) used.add(id);
+      }
+    }
+  }
+  flush();
+}
+var GENERIC_NAMES = /* @__PURE__ */ new Set([
+  "loop",
+  "init",
+  "docs",
+  "plan",
+  "test",
+  "tests",
+  "setup",
+  "report",
+  "update",
+  "config",
+  "debug",
+  "review",
+  "simplify",
+  "schedule",
+  "search",
+  "write",
+  "read",
+  "edit",
+  "task",
+  "tasks",
+  "agent",
+  "agents"
+]);
+function nameKeywords(id, pluginSkills = []) {
+  const name = id.slice(id.indexOf(":") + 1).split("@")[0].replace(/^anthropic-skills:/, "").toLowerCase();
+  const out = /* @__PURE__ */ new Set();
+  const ok = (w) => w.length >= 4 && !STOP.has(w) && !GENERIC_NAMES.has(w);
+  if (ok(name)) out.add(name);
+  if (id.startsWith("tool:")) {
+    for (const p of id.slice(5).split(/(?=[A-Z])/)) if (p.length >= 7 && ok(p.toLowerCase())) out.add(p.toLowerCase());
+  }
+  for (const s of pluginSkills) if (s.length >= 6 && ok(s)) out.add(s);
+  return [...out];
+}
+async function learnTriggers(projects, opts = {}) {
+  const per = opts.sessions ?? 30;
+  const plugins = pluginIndex();
+  const counts = { prompts: 0, df: /* @__PURE__ */ new Map(), items: /* @__PURE__ */ new Map() };
+  let sessions = 0;
+  for (const p of projects) {
+    const files = [];
+    for (const d of p.dirs) {
+      try {
+        for (const f of fs11.readdirSync(d)) if (f.endsWith(".jsonl")) files.push({ file: path13.join(d, f), mtime: fs11.statSync(path13.join(d, f)).mtimeMs });
+      } catch {
+      }
+    }
+    files.sort((a, b) => b.mtime - a.mtime);
+    for (const f of files.slice(0, per)) {
+      await scanSession(f.file, plugins, counts);
+      sessions++;
+    }
+  }
+  const items = {};
+  const ids = /* @__PURE__ */ new Set([...counts.items.keys(), ...[...plugins.values()].map((p) => `plugin:${p.id}`)]);
+  for (const id of ids) {
+    const it = counts.items.get(id);
+    const kws = [];
+    const pskills = id.startsWith("plugin:") ? plugins.get(id.slice(7).split("@")[0])?.skills : void 0;
+    for (const w of nameKeywords(id, pskills)) kws.push({ word: w, weight: 1, hits: it?.words.get(w) ?? 0, source: "name" });
+    for (const [w, c] of it?.words ?? []) {
+      if (c < 2 || kws.some((k) => k.word === w)) continue;
+      const precision = c / (counts.df.get(w) ?? c);
+      if (precision < 0.5) continue;
+      kws.push({ word: w, weight: Math.round(precision * Math.min(1, c / 3) * 100) / 100, hits: c, source: "learned" });
+    }
+    const named = kws.filter((k) => k.source === "name").sort((a, b) => b.hits - a.hits);
+    const learned = kws.filter((k) => k.source === "learned").sort((a, b) => b.weight - a.weight || b.hits - a.hits).slice(0, 10);
+    if (kws.length) items[id] = { prompts: it?.prompts ?? 0, keywords: [...named, ...learned] };
+  }
+  const t = { version: 1, learnedAt: (/* @__PURE__ */ new Date()).toISOString(), sessions, prompts: counts.prompts, items };
+  writeJson(triggersPath(), t);
+  return t;
+}
+function scorePrompt(prompt, candidates2, t, threshold = DEFAULT_THRESHOLD) {
+  if (!t) return [];
+  const words = new Set(tokenize(prompt));
+  const out = [];
+  for (const id of candidates2) {
+    const kws = t.items[id]?.keywords ?? [];
+    const hit = kws.filter((k) => words.has(k.word)).sort((a, b) => b.weight - a.weight);
+    if (!hit.length) continue;
+    const score = Math.min(1, hit[0].weight + hit.slice(1).reduce((a, k) => a + k.weight * 0.25, 0));
+    if (score >= threshold) out.push({ id, score: Math.round(score * 100) / 100, words: hit.map((k) => k.word) });
+  }
+  return out.sort((a, b) => b.score - a.score);
+}
+function shortId(id) {
+  return normalizeSkillName(id.slice(id.indexOf(":") + 1)).split("@")[0];
+}
+
+// src/hook.ts
 var DEPS2 = deps_default;
 var INDEX_MAX_CHARS = 1500;
 var INDEX_HEADER = "Switched off in this project to save context (ask or use /ctx:enable to turn one on):";
 function readHookInput() {
   if (process.stdin.isTTY) return {};
   try {
-    const raw = fs10.readFileSync(0, "utf8");
+    const raw = fs12.readFileSync(0, "utf8");
     return raw.trim() ? JSON.parse(raw) : {};
   } catch {
     return {};
   }
 }
-function hardOffEntries(m, scopes) {
+function hardOffEntries(m, scopes, globalOff = []) {
   const local = scopes.filter((s) => s.scope === "local");
   const trims = activeTrims(local);
   const out = [];
+  for (const g of globalOff) {
+    if (trims.plugins.some((p) => p.id === g.id)) continue;
+    out.push({ label: `${g.id.split("@")[0]} plugin`, desc: g.description });
+  }
   for (const t of trims.tools) {
     const id = `tool:${t.name}`;
     const note = DEPS2[id]?.note;
@@ -2082,7 +2823,7 @@ function sessionStart(root) {
   const m = loadMeasurement(root);
   const scopes = loadScopes(root);
   const applied = loadApplied(root);
-  const index = capabilityIndex(hardOffEntries(m, scopes));
+  const index = capabilityIndex(hardOffEntries(m, scopes, globalOffHere(root)));
   const out = {};
   if (index) out.hookSpecificOutput = { hookEventName: "SessionStart", additionalContext: index };
   const owned = ownedRefs(applied).length;
@@ -2102,15 +2843,50 @@ function sessionStart(root) {
   }
   return out;
 }
-function sessionEnd(root, cliPath) {
-  if (!loadMeasurement(root) && !loadLedger(root)) return;
-  const child = spawn2(process.execPath, [cliPath, "usage", "--quiet", "--project", root], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true,
-    shell: false
-  });
+function spawnDetached(cliPath, args) {
+  const child = spawn2(process.execPath, [cliPath, ...args], { detached: true, stdio: "ignore", windowsHide: true, shell: false });
   child.unref();
+}
+var LEARN_EVERY_MS = 6 * 36e5;
+function sessionEnd(root, cliPath) {
+  if (loadMeasurement(root) || loadLedger(root)) spawnDetached(cliPath, ["usage", "--quiet", "--project", root]);
+  if (loadConfig().auto) {
+    const t = loadTriggers();
+    if (!t || Date.now() - Date.parse(t.learnedAt) > LEARN_EVERY_MS) spawnDetached(cliPath, ["triggers", "learn", "--quiet"]);
+  }
+}
+function offCandidates(root) {
+  const a = loadApplied(root);
+  const ids = /* @__PURE__ */ new Set();
+  for (const t of a.owned.deny) ids.add(`tool:${t}`);
+  for (const [p, v] of Object.entries(a.owned.plugins)) if (v === false) ids.add(`plugin:${p}`);
+  for (const [s, v] of Object.entries(a.owned.skills)) if (v === "off") ids.add(`skill:${s}`);
+  for (const g of globalOffHere(root)) ids.add(`plugin:${g.id}`);
+  return [...ids];
+}
+var MAX_AUTO = 2;
+function promptSubmit(root, prompt) {
+  const cfg = loadConfig();
+  if (!cfg.auto || !prompt.trim()) return {};
+  const t = loadTriggers();
+  if (!t) return {};
+  const candidates2 = offCandidates(root);
+  if (!candidates2.length) return {};
+  const matches = scorePrompt(prompt, candidates2, t, cfg.threshold ?? DEFAULT_THRESHOLD).slice(0, MAX_AUTO);
+  const context = [];
+  const notes = [];
+  for (const mt of matches) {
+    const lines = [];
+    const words = mt.words.map((w) => `"${w}"`).join(", ");
+    if (on(root, mt.id, { reason: `auto: prompt mentions ${words}` }, (s) => lines.push(s)) !== 0) continue;
+    context.push(`ctx switched ${mt.id} back on because the prompt mentions ${words}.`, ...lines);
+    notes.push(`${shortId(mt.id)}${mt.id.startsWith("plugin:") ? " (run /reload-plugins to load it now)" : ""}`);
+  }
+  if (!context.length) return {};
+  return {
+    systemMessage: `ctx: switched on ${notes.join(", ")} for this prompt. /ctx:auto off disables this.`,
+    hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: context.join("\n") }
+  };
 }
 
 // src/cli.ts
@@ -2143,7 +2919,17 @@ Usage: ctx <command> [flags]
   off <item> [--level name-only|off] [--force]   switch one item off
   undo [all]                                restore the previous backup, or the original file
   verify                                    one /context run of the current settings
-  hook session-start | session-end          hook entry points (cached data only)
+  global [--days N] [--sessions N] [--share X] [--json]
+                                            cross-project plan: extras used in few projects go off in
+                                            ~/.claude/settings.json and stay on where they're used
+  global apply [--items id1,id2] [--yes]    write it (dry run without --yes)
+  global undo                               remove everything ctx global wrote
+  projects                                  projects ctx knows (registry and transcripts)
+  auto on|off|status [--threshold X]        learned triggers: switch items back on from prompt words
+  triggers [learn] [--json] | triggers test "<prompt>"
+                                            show, re-learn or try the trigger table
+  hook session-start | session-end | prompt-submit
+                                            hook entry points (cached data only)
 Items: tool:Artifact, plugin:cloudflare@cloudflare, skill:docx, or just a name ("artifact").
 Global: --project <dir> (default: CLAUDE_PROJECT_DIR or cwd)`;
 async function main(argv) {
@@ -2191,6 +2977,9 @@ async function main(argv) {
           if (out.systemMessage || out.hookSpecificOutput) process.stdout.write(JSON.stringify(out));
         } else if (a.positional[0] === "session-end") {
           sessionEnd(hookRoot, process.argv[1]);
+        } else if (a.positional[0] === "prompt-submit") {
+          const out = promptSubmit(hookRoot, input.prompt ?? "");
+          if (out.systemMessage || out.hookSpecificOutput) process.stdout.write(JSON.stringify(out));
         }
       } catch (e) {
         if (process.env.CTX_DEBUG) console.error(e);
@@ -2289,6 +3078,108 @@ async function main(argv) {
     case "doctor":
       console.log(renderDoctor(root));
       return 0;
+    case "global": {
+      const sub = a.positional[0] ?? "plan";
+      const out = (s) => console.log(s);
+      if (sub === "undo") return undoGlobal(out);
+      if (sub === "apply") {
+        const plan2 = loadGlobalPlan();
+        if (!plan2) {
+          console.error("No global plan yet. Run: ctx global");
+          return 2;
+        }
+        const items = typeof a.flags.items === "string" ? a.flags.items.split(/[,\s]+/).filter(Boolean) : void 0;
+        return applyGlobal(plan2, { yes: !!a.flags.yes, items }, out);
+      }
+      if (sub !== "plan") {
+        console.error(`Unknown: ctx global ${sub} (plan, apply, undo)`);
+        return 2;
+      }
+      const num = (k) => typeof a.flags[k] === "string" ? Number(a.flags[k]) : void 0;
+      const plan = await buildGlobalPlan({ days: num("days"), sessions: num("sessions"), share: num("share"), minTokens: num("min-tokens") });
+      console.log(a.flags.json ? JSON.stringify(plan, null, 2) : renderGlobalPlan(plan));
+      return 0;
+    }
+    case "projects": {
+      const ps = await discoverProjects();
+      for (const p of ps) {
+        console.log(`${p.key.padEnd(56).slice(0, 56)} ${String(p.sessions).padStart(4)} sessions  last ${p.lastActive?.slice(0, 10) ?? "-".padEnd(10)}${p.registered ? "  profiled" : ""}${p.exists ? "" : "  (folder gone)"}`);
+      }
+      return 0;
+    }
+    case "auto": {
+      const sub = a.positional[0] ?? "status";
+      const cfg = loadConfig();
+      if (typeof a.flags.threshold === "string") {
+        const t2 = Number(a.flags.threshold);
+        if (!(t2 > 0 && t2 <= 1)) {
+          console.error("--threshold must be between 0 and 1");
+          return 2;
+        }
+        cfg.threshold = t2;
+      }
+      if (sub === "on" || sub === "off") {
+        cfg.auto = sub === "on";
+        saveConfig(cfg);
+        if (cfg.auto) {
+          const t2 = await learnTriggers(await discoverProjects());
+          console.log(`Auto re-enable is on. Learned triggers from ${t2.prompts} prompts in ${t2.sessions} sessions.`);
+          console.log("When a prompt clearly needs a switched-off item, ctx switches it back on before Claude sees the prompt.");
+        } else {
+          console.log("Auto re-enable is off. Claude can still use /ctx:enable, and you can use /ctx:on.");
+        }
+        return 0;
+      }
+      if (sub !== "status") {
+        console.error("Usage: ctx auto on|off|status");
+        return 2;
+      }
+      if (typeof a.flags.threshold === "string") saveConfig(cfg);
+      const t = loadTriggers();
+      console.log(`Auto re-enable: ${cfg.auto ? "on" : "off"} (threshold ${cfg.threshold ?? DEFAULT_THRESHOLD})`);
+      console.log(t ? `Triggers learned ${t.learnedAt.slice(0, 16).replace("T", " ")} UTC from ${t.prompts} prompts.` : "No triggers learned yet.");
+      const cands = offCandidates(root);
+      if (cands.length) {
+        console.log("Switched off here, with the words that switch each back on:");
+        for (const id of cands) {
+          const kws = t?.items[id]?.keywords ?? [];
+          console.log(`  ${id.padEnd(36)} ${kws.length ? kws.slice(0, 8).map((k) => k.word).join(", ") : "(no triggers; use /ctx:on)"}`.slice(0, 100));
+        }
+      } else {
+        console.log("Nothing ctx switched off in this project.");
+      }
+      return 0;
+    }
+    case "triggers": {
+      const sub = a.positional[0];
+      if (sub === "learn") {
+        const t2 = await learnTriggers(await discoverProjects());
+        if (!a.flags.quiet) console.log(`Learned triggers for ${Object.keys(t2.items).length} items from ${t2.prompts} prompts in ${t2.sessions} sessions.`);
+        return 0;
+      }
+      const t = loadTriggers();
+      if (!t) {
+        console.log("No triggers learned yet. Run: ctx triggers learn");
+        return 0;
+      }
+      if (sub === "test") {
+        const prompt = a.positional.slice(1).join(" ");
+        const ids = Object.keys(t.items);
+        const ms = scorePrompt(prompt, ids, t, 0);
+        const thr = loadConfig().threshold ?? DEFAULT_THRESHOLD;
+        if (!ms.length) console.log("No item matches.");
+        for (const m of ms.slice(0, 10)) console.log(`${m.score >= thr ? "ON " : "   "} ${m.id.padEnd(36)} ${m.score.toFixed(2)}  ${m.words.join(", ")}`);
+        return 0;
+      }
+      if (a.flags.json) {
+        console.log(JSON.stringify(t, null, 2));
+        return 0;
+      }
+      for (const [id, it] of Object.entries(t.items).sort((x, y) => y[1].prompts - x[1].prompts)) {
+        console.log(`${id.padEnd(36)} ${String(it.prompts).padStart(4)} prompts  ${it.keywords.slice(0, 6).map((k) => `${k.word}${k.source === "learned" ? ` ${k.weight}` : ""}`).join(", ")}`.slice(0, 100));
+      }
+      return 0;
+    }
     case "help":
     case "--help":
     case "-h":

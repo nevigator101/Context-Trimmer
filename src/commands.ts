@@ -11,8 +11,8 @@ import { findRule, loadScopes } from './settings.js';
 import { fmtK } from './tokens.js';
 import { ledgerPath, loadLedger, type Ledger } from './usage.js';
 import {
-  clearEntry, describeRef, ENABLE_RULE, loadApplied, ownedRefs, refKey, setEntry, undo as undoWrite, writeSettings, appliedPath,
-  type Applied, type EntryRef,
+  clearEntry, describeRef, ENABLE_RULE, isKeepOn, loadApplied, ownedRefs, refKey, setEntry, undo as undoWrite, writeSettings,
+  appliedPath, globalTarget, type Applied, type EntryRef,
 } from './writer.js';
 import { loadProfile } from './profile.js';
 
@@ -91,7 +91,8 @@ export async function apply(root: string, opts: ApplyOptions, out: Out): Promise
     // Converge: drop owned entries the plan no longer wants (except ones the user switched off with `ctx off`).
     const pinned = new Set(a.pinnedOff ?? []);
     for (const r of ownedRefs(a)) {
-      if (r.kind === 'allow' || desiredKeys.has(refKey(r)) || pinned.has(refKey(r))) continue;
+      // Keep-on overrides belong to `ctx on` / `ctx global`, not to the plan.
+      if (r.kind === 'allow' || isKeepOn(r) || desiredKeys.has(refKey(r)) || pinned.has(refKey(r))) continue;
       if (clearEntry(s, a, r) === 'removed') changes.push(`removed ${describeRef(r)} (no longer planned)`);
     }
     for (const r of desired) {
@@ -249,13 +250,42 @@ export function on(root: string, query: string, opts: OnOptions, out: Out): numb
     : ref.kind === 'plugin' ? findRule(scopes, 'plugin', ref.id)
       : ref.kind === 'skill' ? findRule(scopes, 'skill', ref.name) : [];
   const other = where.filter((s) => s.scope !== 'local');
+  const key = ref.kind === 'tool' ? `permissions.deny "${ref.name}"` : ref.kind === 'plugin' ? `enabledPlugins["${ref.id}"]` : ref.kind === 'skill' ? `skillOverrides["${ref.name}"]` : '';
+  // A plugin or skill switched off in user or shared project settings: a project-local value overrides it
+  // (VERIFY.md items 8 and 26), so switch it on for this project without touching the other file.
+  const overridable = other.filter((s) => s.scope === 'user' || s.scope === 'project');
+  if ((ref.kind === 'plugin' || ref.kind === 'skill') && overridable.length && !other.some((s) => s.scope === 'managed')) {
+    const keep: EntryRef = ref.kind === 'plugin' ? { kind: 'plugin', id: ref.id, value: true } : { kind: 'skill', name: ref.name, level: 'on' };
+    let skipped: string | undefined;
+    const w = writeSettings(root, `on ${id}`, (s, a) => {
+      const c = setEntry(s, a, keep);
+      if (c?.startsWith('skipped')) { skipped = c; return []; }
+      return c ? [c] : [];
+    });
+    if (skipped) { out(`${skipped}. ${id} stays as you set it in ${w.file}.`); return 1; }
+    const src = overridable[0];
+    const byCtx = src.scope === 'user' && key && isGlobalOwned(ref);
+    out(`${id} is switched off in ${src.path} (${src.scope} settings${byCtx ? ', by ctx global' : ''}), key ${key}. `
+      + (w.changes.length ? `Added a project-local override in ${w.file} (backup ${w.backup}), so it is on in this project only.`
+        : `This project already overrides it locally.`));
+    for (const l of howItApplies(id, m)) out(l);
+    if (w.changes.length) recordReenable(root, id, opts.reason);
+    return 0;
+  }
   if (other.length) {
-    const key = ref.kind === 'tool' ? `permissions.deny "${ref.name}"` : ref.kind === 'plugin' ? `enabledPlugins["${ref.id}"]` : ref.kind === 'skill' ? `skillOverrides["${ref.name}"]` : '';
     for (const s of other) out(`${id} is switched off in ${s.path} (${s.scope} settings), key ${key}. ctx doesn't edit that file; change it there.`);
     return 1;
   }
   out(`${id} is already on.`);
   return 0;
+}
+
+/** Was this entry written to user settings by `ctx global`? */
+function isGlobalOwned(ref: EntryRef): boolean {
+  const g = loadApplied(globalTarget());
+  if (ref.kind === 'plugin') return g.owned.plugins[ref.id] === false;
+  if (ref.kind === 'skill') return ref.name in g.owned.skills;
+  return false;
 }
 
 export interface OffOptions { force?: boolean; level?: 'name-only' | 'off'; }

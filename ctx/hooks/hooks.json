@@ -6,6 +6,11 @@
         "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/ctx.mjs\" hook session-start", "timeout": 10 } ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/ctx.mjs\" hook prompt-submit", "timeout": 10 } ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/ctx.mjs\" hook session-end", "timeout": 10 } ]

@@ -9,7 +9,10 @@ import { allowEnable, apply, off, on, undo, verifyAndRecord } from './commands.j
 import { buildPlan, loadPlan, renderPlan, reviewPlan, savePlan, type Group } from './plan.js';
 import { loadProfile, setProfile } from './profile.js';
 import { protectedIds } from './protect.js';
-import { readHookInput, sessionEnd, sessionStart } from './hook.js';
+import { offCandidates, promptSubmit, readHookInput, sessionEnd, sessionStart } from './hook.js';
+import { applyGlobal, buildGlobalPlan, loadGlobalPlan, renderGlobalPlan, undoGlobal } from './global.js';
+import { discoverProjects } from './registry.js';
+import { DEFAULT_THRESHOLD, learnTriggers, loadConfig, loadTriggers, saveConfig, scorePrompt } from './triggers.js';
 
 const GROUPS: Group[] = ['tools', 'plugins', 'skills', 'skills-off', 'rare'];
 function parseGroups(v: string | true | undefined): Group[] | undefined {
@@ -41,7 +44,17 @@ Usage: ctx <command> [flags]
   off <item> [--level name-only|off] [--force]   switch one item off
   undo [all]                                restore the previous backup, or the original file
   verify                                    one /context run of the current settings
-  hook session-start | session-end          hook entry points (cached data only)
+  global [--days N] [--sessions N] [--share X] [--json]
+                                            cross-project plan: extras used in few projects go off in
+                                            ~/.claude/settings.json and stay on where they're used
+  global apply [--items id1,id2] [--yes]    write it (dry run without --yes)
+  global undo                               remove everything ctx global wrote
+  projects                                  projects ctx knows (registry and transcripts)
+  auto on|off|status [--threshold X]        learned triggers: switch items back on from prompt words
+  triggers [learn] [--json] | triggers test "<prompt>"
+                                            show, re-learn or try the trigger table
+  hook session-start | session-end | prompt-submit
+                                            hook entry points (cached data only)
 Items: tool:Artifact, plugin:cloudflare@cloudflare, skill:docx, or just a name ("artifact").
 Global: --project <dir> (default: CLAUDE_PROJECT_DIR or cwd)`;
 
@@ -87,6 +100,9 @@ async function main(argv: string[]): Promise<number> {
           if (out.systemMessage || out.hookSpecificOutput) process.stdout.write(JSON.stringify(out));
         } else if (a.positional[0] === 'session-end') {
           sessionEnd(hookRoot, process.argv[1]);
+        } else if (a.positional[0] === 'prompt-submit') {
+          const out = promptSubmit(hookRoot, input.prompt ?? '');
+          if (out.systemMessage || out.hookSpecificOutput) process.stdout.write(JSON.stringify(out));
         }
       } catch (e) {
         if (process.env.CTX_DEBUG) console.error(e);
@@ -167,6 +183,91 @@ async function main(argv: string[]): Promise<number> {
     case 'doctor':
       console.log(renderDoctor(root));
       return 0;
+    case 'global': {
+      const sub = a.positional[0] ?? 'plan';
+      const out = (s: string) => console.log(s);
+      if (sub === 'undo') return undoGlobal(out);
+      if (sub === 'apply') {
+        const plan = loadGlobalPlan();
+        if (!plan) { console.error('No global plan yet. Run: ctx global'); return 2; }
+        const items = typeof a.flags.items === 'string' ? a.flags.items.split(/[,\s]+/).filter(Boolean) : undefined;
+        return applyGlobal(plan, { yes: !!a.flags.yes, items }, out);
+      }
+      if (sub !== 'plan') { console.error(`Unknown: ctx global ${sub} (plan, apply, undo)`); return 2; }
+      const num = (k: string) => (typeof a.flags[k] === 'string' ? Number(a.flags[k]) : undefined);
+      const plan = await buildGlobalPlan({ days: num('days'), sessions: num('sessions'), share: num('share'), minTokens: num('min-tokens') });
+      console.log(a.flags.json ? JSON.stringify(plan, null, 2) : renderGlobalPlan(plan));
+      return 0;
+    }
+    case 'projects': {
+      const ps = await discoverProjects();
+      for (const p of ps) {
+        console.log(`${p.key.padEnd(56).slice(0, 56)} ${String(p.sessions).padStart(4)} sessions  last ${p.lastActive?.slice(0, 10) ?? '-'.padEnd(10)}`
+          + `${p.registered ? '  profiled' : ''}${p.exists ? '' : '  (folder gone)'}`);
+      }
+      return 0;
+    }
+    case 'auto': {
+      const sub = a.positional[0] ?? 'status';
+      const cfg = loadConfig();
+      if (typeof a.flags.threshold === 'string') {
+        const t = Number(a.flags.threshold);
+        if (!(t > 0 && t <= 1)) { console.error('--threshold must be between 0 and 1'); return 2; }
+        cfg.threshold = t;
+      }
+      if (sub === 'on' || sub === 'off') {
+        cfg.auto = sub === 'on';
+        saveConfig(cfg);
+        if (cfg.auto) {
+          const t = await learnTriggers(await discoverProjects());
+          console.log(`Auto re-enable is on. Learned triggers from ${t.prompts} prompts in ${t.sessions} sessions.`);
+          console.log('When a prompt clearly needs a switched-off item, ctx switches it back on before Claude sees the prompt.');
+        } else {
+          console.log('Auto re-enable is off. Claude can still use /ctx:enable, and you can use /ctx:on.');
+        }
+        return 0;
+      }
+      if (sub !== 'status') { console.error('Usage: ctx auto on|off|status'); return 2; }
+      if (typeof a.flags.threshold === 'string') saveConfig(cfg);
+      const t = loadTriggers();
+      console.log(`Auto re-enable: ${cfg.auto ? 'on' : 'off'} (threshold ${cfg.threshold ?? DEFAULT_THRESHOLD})`);
+      console.log(t ? `Triggers learned ${t.learnedAt.slice(0, 16).replace('T', ' ')} UTC from ${t.prompts} prompts.` : 'No triggers learned yet.');
+      const cands = offCandidates(root);
+      if (cands.length) {
+        console.log('Switched off here, with the words that switch each back on:');
+        for (const id of cands) {
+          const kws = t?.items[id]?.keywords ?? [];
+          console.log(`  ${id.padEnd(36)} ${kws.length ? kws.slice(0, 8).map((k) => k.word).join(', ') : '(no triggers; use /ctx:on)'}`.slice(0, 100));
+        }
+      } else {
+        console.log('Nothing ctx switched off in this project.');
+      }
+      return 0;
+    }
+    case 'triggers': {
+      const sub = a.positional[0];
+      if (sub === 'learn') {
+        const t = await learnTriggers(await discoverProjects());
+        if (!a.flags.quiet) console.log(`Learned triggers for ${Object.keys(t.items).length} items from ${t.prompts} prompts in ${t.sessions} sessions.`);
+        return 0;
+      }
+      const t = loadTriggers();
+      if (!t) { console.log('No triggers learned yet. Run: ctx triggers learn'); return 0; }
+      if (sub === 'test') {
+        const prompt = a.positional.slice(1).join(' ');
+        const ids = Object.keys(t.items);
+        const ms = scorePrompt(prompt, ids, t, 0);
+        const thr = loadConfig().threshold ?? DEFAULT_THRESHOLD;
+        if (!ms.length) console.log('No item matches.');
+        for (const m of ms.slice(0, 10)) console.log(`${m.score >= thr ? 'ON ' : '   '} ${m.id.padEnd(36)} ${m.score.toFixed(2)}  ${m.words.join(', ')}`);
+        return 0;
+      }
+      if (a.flags.json) { console.log(JSON.stringify(t, null, 2)); return 0; }
+      for (const [id, it] of Object.entries(t.items).sort((x, y) => y[1].prompts - x[1].prompts)) {
+        console.log(`${id.padEnd(36)} ${String(it.prompts).padStart(4)} prompts  ${it.keywords.slice(0, 6).map((k) => `${k.word}${k.source === 'learned' ? ` ${k.weight}` : ''}`).join(', ')}`.slice(0, 100));
+      }
+      return 0;
+    }
     case 'help': case '--help': case '-h':
       console.log(HELP);
       return 0;

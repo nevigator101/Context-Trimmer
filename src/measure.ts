@@ -4,6 +4,7 @@ import path from 'node:path';
 import { findClaude, type ClaudeBinary } from './binary.js';
 import { pluginOfSource, type ContextReport } from './parse.js';
 import { projectKey, projectStateDir, readJson, writeJson } from './paths.js';
+import { registerProject } from './registry.js';
 import { captureRequest, firstSentence, pool, runContext, type RunSpec } from './runner.js';
 import {
   effectivePlugins, installedPlugins, loadScopes, pluginDescriptions, stripTrimKeys, type Json, type SettingsFile,
@@ -277,6 +278,7 @@ export async function measure(root: string, opts: MeasureOptions = {}): Promise<
     unparsed: refR.unparsed.map((u) => u.heading),
   };
   writeJson(measurementPath(root), m);
+  registerProject(root);
   return m;
 }
 

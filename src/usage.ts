@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { claudeJsonPath, projectKey, projectStateDir, readJson, transcriptDirs, writeJson } from './paths.js';
+import { registerProject } from './registry.js';
 
 export interface UsageItem { sessionsUsed: number; calls: number; lastUsedAt?: string; }
 
@@ -71,12 +72,25 @@ async function scanFile(file: string, into: SessionScan): Promise<void> {
   }
 }
 
-export interface UsageOptions { sessions?: number; }
+export interface UsageOptions {
+  sessions?: number;
+  /** Transcript directories to scan (default: the project's own, found by slug). */
+  dirs?: string[];
+}
 
+/** Build the project's ledger and save it. */
 export async function buildLedger(root: string, opts: UsageOptions = {}): Promise<Ledger> {
+  const ledger = await scanLedger(root, opts);
+  writeJson(ledgerPath(root), ledger);
+  registerProject(root);
+  return ledger;
+}
+
+/** Scan a project's transcripts into a ledger without saving it. */
+export async function scanLedger(root: string, opts: UsageOptions = {}): Promise<Ledger> {
   const window = opts.sessions ?? 10;
   const files: { file: string; id: string; mtime: number; dir: string }[] = [];
-  for (const dir of transcriptDirs(root)) {
+  for (const dir of opts.dirs ?? transcriptDirs(root)) {
     for (const f of fs.readdirSync(dir)) {
       if (!f.endsWith('.jsonl')) continue;
       const full = path.join(dir, f);
@@ -118,7 +132,6 @@ export async function buildLedger(root: string, opts: UsageOptions = {}): Promis
     }
     ledger.sessions.push({ id: f.id, file: f.file, mtime: new Date(f.mtime).toISOString(), calls });
   }
-  writeJson(ledgerPath(root), ledger);
   return ledger;
 }
 

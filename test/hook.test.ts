@@ -113,4 +113,27 @@ describe('sessionStart', () => {
     expect(JSON.parse(stdout).hookSpecificOutput.hookEventName).toBe('SessionStart');
     expect(Math.min(...times)).toBeLessThan(300);
   });
+
+  it('prompt-submit hook (runs on every prompt) is silent and fast with auto off and on', () => {
+    const cli = path.resolve(__dirname, '..', 'ctx', 'dist', 'ctx.mjs');
+    if (!fs.existsSync(cli)) return;
+    writeJson(measurementPath(root), measurement(16700));
+    writeSettings(root, 'test', (s, a) => [setEntry(s, a, { kind: 'tool', name: 'Artifact' })!]);
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: root };
+    const run = () => {
+      const t = performance.now();
+      const r = spawnSync(process.execPath, [cli, 'hook', 'prompt-submit'], { env, input: '{"prompt":"refactor the parser"}', encoding: 'utf8' });
+      return { ms: performance.now() - t, out: r.stdout };
+    };
+    run();
+    const off = [run(), run(), run()];
+    expect(off.every((r) => r.out === '')).toBe(true);
+    expect(Math.min(...off.map((r) => r.ms))).toBeLessThan(300);
+    writeJson(path.join(state, 'config.json'), { auto: true });
+    writeJson(path.join(state, 'triggers.json'), { version: 1, learnedAt: new Date().toISOString(), sessions: 1, prompts: 1,
+      items: { 'tool:Artifact': { prompts: 1, keywords: [{ word: 'artifact', weight: 1, hits: 1, source: 'name' }] } } });
+    const on = [run(), run(), run()];
+    expect(on.every((r) => r.out === '')).toBe(true); // no match: still silent
+    expect(Math.min(...on.map((r) => r.ms))).toBeLessThan(300);
+  });
 });

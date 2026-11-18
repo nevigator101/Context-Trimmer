@@ -41,6 +41,16 @@ server that saves the request body and answers HTTP 400, so no model call is mad
 | 24 | S4: the plugin's own context cost | Request capture with and without `--plugin-dir ./ctx`: **+172 chars (about 50 tokens)**, which is only the `ctx:enable` listing line. The seven user-only skills aren't listed. The capability index for this project adds about 100 tokens. | Meets S4 (under 300 with nothing off, under 600 with the index). |
 | 25 | S5: SessionStart hook latency | About 160 ms per run (Node startup included) on the reference machine; unit test `S5` checks under 300 ms. | Meets S5. |
 
+## Milestone 4 findings (2026-11-18)
+
+| # | Question | Result | Design impact |
+|---|---|---|---|
+| 26 | Does a project-local `skillOverrides` value override a user-level one? | **Yes, per key.** Temporary `CLAUDE_CONFIG_DIR` with user `skillOverrides: {dataviz: "name-only"}`: dataviz shows `< 20` tokens; with local `{dataviz: "on"}` it shows `~480`; with local `"off"` it's absent. Other user-level overrides stay in force. | `/ctx:global` sets skills to name-only in user settings and writes a local `"on"` in projects that use them. The untrimmed reference keeps local `"on"` values. |
+| 27 | Does project-**local** `enabledPlugins: true` override user `false`? (Item 8 tested the shared `.claude/settings.json`.) | **Yes.** Same run: `watch:watch` absent with user `false`, listed with local `true`. | Keep-on overrides go in `settings.local.json`, so nothing is committed to the repo. |
+| 28 | UserPromptSubmit hook in a plugin (`test/e2e/auto-trigger.mjs`, fake API) | The hook gets `prompt` in its stdin JSON. `hookSpecificOutput.additionalContext` reaches the **conversation** request (a turn can also send a separate session-title request without it). `systemMessage` is shown to the user as `UserPromptSubmit says: …`. A plugin re-enabled by the hook needs `/reload-plugins`, as with `/ctx:enable`. | As built: the hook switches the item on, tells Claude why and what to do next, and prints one notice. |
+| 29 | M4 acceptance: two projects, each with its own extra (`test/e2e/global-switch.mjs`, real binary, temp config dir) | Before: both plugins load in both projects. After `ctx global apply`: A loads only cloudflare, B only watch. B's SessionStart index lists cloudflare as switched off; `ctx on cloudflare` in B adds a local override and B loads it. `ctx global undo` restores the user settings byte for byte and removes A's override. | Met. |
+| 30 | Prompt-submit hook cost | Silent unless a trigger matches; under 300 ms per prompt with auto off and on (unit test). With auto off it reads one small config file and exits. | Registered unconditionally in `hooks.json`; `/ctx:auto on` only flips the config. |
+
 ## Changes to the design (applied in code)
 
 1. Every measurement run passes `--no-session-persistence` and spawns with stdin ignored.
@@ -48,6 +58,8 @@ server that saves the request body and answers HTTP 400, so no model call is mad
 3. Plugin skills are never set in `skillOverrides`; their plugin is the lever.
 4. The upfront tool list comes from request capture when it works; otherwise from the seed list.
 5. The measurement cache is stored **per project** (`projects/<hash>/measurement.json`), keyed by Claude Code version plus a fingerprint of the settings files, because costs depend on the project's skills, memory files and MCP config.
+6. **M4:** `/ctx:global` writes user settings (`~/.claude/settings.json`) through the same writer, with its own ownership record and backups in `~/.claude/ctx/global/`. Claude Code writes `enabledPlugins: {"x": true}` there on install, so the global writer may *replace* a `true` with `false` and records the old value; undo puts it back. Built-in tools are never trimmed globally (a user-level deny can't be overridden per project).
+7. **M4:** `ctx on` for a plugin or skill switched off in user or shared project settings writes a project-local keep-on override instead of telling the user to edit the other file.
 
 ## Still open
 

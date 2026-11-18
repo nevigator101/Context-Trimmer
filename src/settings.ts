@@ -57,18 +57,31 @@ export function stripTrimKeys(data: Json | undefined): Json {
     for (const [k, v] of Object.entries(out.enabledPlugins)) if (v === false) delete out.enabledPlugins[k];
     if (!Object.keys(out.enabledPlugins).length) delete out.enabledPlugins;
   }
-  delete out.skillOverrides;
+  // Keep "on" overrides: they undo a user-level trim (ctx global) and belong to the untrimmed project config.
+  if (isObj(out.skillOverrides)) {
+    for (const [k, v] of Object.entries(out.skillOverrides)) if (v !== 'on') delete out.skillOverrides[k];
+    if (!Object.keys(out.skillOverrides).length) delete out.skillOverrides;
+  }
   delete out.disabledMcpjsonServers;
   return out;
 }
 
-/** Effective enabledPlugins map across user < project < local. */
+/**
+ * Effective enabledPlugins map across user < project < local.
+ * `skipLocal`: the untrimmed reference config, where local `false` trims are ignored but local `true` keep-on
+ * overrides still apply (stripTrimKeys keeps them).
+ */
 export function effectivePlugins(scopes: SettingsFile[], opts: { skipLocal?: boolean } = {}): Record<string, boolean> {
   const out: Record<string, boolean> = {};
   for (const s of scopes) {
-    if (s.scope === 'managed' || (opts.skipLocal && s.scope === 'local')) continue;
+    if (s.scope === 'managed') continue;
     const ep = s.data?.enabledPlugins;
-    if (isObj(ep)) for (const [k, v] of Object.entries(ep)) if (typeof v === 'boolean') out[k] = v;
+    if (isObj(ep)) {
+      for (const [k, v] of Object.entries(ep)) {
+        if (typeof v !== 'boolean' || (opts.skipLocal && s.scope === 'local' && !v)) continue;
+        out[k] = v;
+      }
+    }
   }
   return out;
 }

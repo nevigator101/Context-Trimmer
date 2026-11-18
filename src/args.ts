@@ -3,7 +3,9 @@ export interface Args { cmd: string; positional: string[]; flags: Record<string,
 export function parseArgs(argv: string[]): Args {
   const flags: Record<string, string | true> = {};
   const positional: string[] = [];
-  const valued = new Set(['only', 'sessions', 'plan', 'project', 'set', 'groups', 'reason', 'level', 'min-tokens']);
+  const valued = new Set([
+    'only', 'sessions', 'plan', 'project', 'set', 'groups', 'reason', 'level', 'min-tokens', 'days', 'share', 'items', 'threshold',
+  ]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--')) {

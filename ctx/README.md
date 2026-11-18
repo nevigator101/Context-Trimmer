@@ -4,7 +4,7 @@ ctx measures what every new Claude Code session loads up front in a project: bui
 
 It then writes a lean profile to the project's `.claude/settings.local.json`, using only entries it can undo: tool denies, plugins off, and skills set to name-only. Items used in the project's recent sessions are never switched off unless you confirm.
 
-**Status: 0.1.0, milestone 3 (measure, report, plan, apply, undo, session start, re-enable).** Cross-project baselines (`/ctx:global`) and learned triggers arrive in milestone 4.
+**Status: 0.1.0, milestone 4 (measure, report, plan, apply, undo, session start, re-enable, cross-project baseline, learned triggers).**
 
 ## Commands
 
@@ -17,6 +17,8 @@ It then writes a lean profile to the project's `.claude/settings.local.json`, us
 | `/ctx:off <item>` | Switch an item off (`/ctx:off cloudflare`) |
 | `/ctx:undo [all]` | Restore the previous backup, or the original file |
 | `/ctx:enable <item>` | Used by Claude: switches an item back on when a task needs it |
+| `/ctx:global [undo]` | Cross-project baseline: plugins and skills used in only a few projects go off in your user settings and stay on in the projects that use them |
+| `/ctx:auto on\|off` | Learned triggers: when a prompt clearly needs a switched-off item ("deploy with wrangler"), ctx switches it on before Claude reads the prompt |
 | `/ctx:doctor` | Shows which `claude` binary is used, the settings files and their scopes, the transcript folders, how fresh the cache is, and whether the profile is in force |
 
 The CLI can also be run directly: `node dist/ctx.mjs help`.
@@ -26,7 +28,17 @@ The CLI can also be run directly: `node dist/ctx.mjs help`.
 - ctx only adds or removes the entries it owns. It records them in `~/.claude/ctx/projects/<hash>/applied.json`. Entries you wrote yourself are left alone.
 - Every write is preceded by a backup, made atomically, and checked by re-reading. `undo` restores the file byte for byte, and `undo all` restores the original (or removes the file if it didn't exist).
 - The protected list is never touched: Read, Edit, Write, Glob, Grep, Skill, ToolSearch, AskUserQuestion, Bash, Agent, and PowerShell on Windows when you use it.
-- Settings in other scopes (user, project, managed) are never edited; ctx tells you the file and the key.
+- Settings in other scopes (user, project, managed) are not edited, with one exception: `/ctx:global` writes the entries it owns in `~/.claude/settings.json`, after you confirm them. If an item is switched off in user or shared project settings, `/ctx:on` adds an override in this project's `settings.local.json` and leaves the other file alone. Tool denies and managed settings can't be overridden; for those, ctx tells you the file and the key.
+
+## Moving between projects
+
+`/ctx:global` looks at the recent sessions of every project on this machine. It finds plugins and skills that only some projects use, for example a Cloudflare plugin used in one project. It proposes switching those off in your user settings (skills go to name-only, so they stay callable) and keeping them on in the projects that use them, through a local override. Items used by most projects stay on, and so does ctx itself. Built-in tools aren't trimmed globally, because a user-level deny can't be overridden in a project.
+
+The project overrides are written first and the user settings last, so a failure never leaves a project without something it uses. `/ctx:global undo` removes exactly what ctx wrote and puts back any value it replaced. When a project needs an item later, `/ctx:on <item>` brings it back for that project only.
+
+## Learned triggers (opt-in)
+
+`/ctx:auto on` learns, from recent sessions in all projects, which words in your prompts came before each tool, plugin or skill was used. It also uses the item's own name and, for plugins, their skill names. After that, a UserPromptSubmit hook checks each prompt locally, with no model call. When the prompt clearly needs something ctx switched off in this project, the hook switches it back on, tells Claude why, and prints one line for you. A plugin brought back this way still needs `/reload-plugins` in the current session. The hook is silent otherwise and costs nothing in context. `/ctx:auto` shows the trigger words for everything that's off; `/ctx:auto off` stops it.
 
 ## Every new session
 
@@ -51,7 +63,7 @@ The plugin itself costs about 50 tokens per session: the `ctx:enable` line in th
 
 ## Data
 
-ctx keeps its state in `~/.claude/ctx/`: measurements, the usage ledger, plans, the ownership record and backups. It reads `~/.claude.json` and never writes it. The only settings file it writes is the project's `.claude/settings.local.json`.
+ctx keeps its state in `~/.claude/ctx/`: measurements, the usage ledger, plans, the ownership records and backups, the project registry, and the trigger table. It reads `~/.claude.json` and never writes it. It writes projects' `.claude/settings.local.json`, and `~/.claude/settings.json` only through `/ctx:global`.
 
 ## Note on `/context` totals
 

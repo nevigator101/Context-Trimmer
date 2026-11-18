@@ -1,15 +1,18 @@
-// Settings writer (spec §8). Merge-only edits of <project>/.claude/settings.local.json with an ownership record,
-// a backup before every write, atomic replace, validation with auto-restore, and byte-for-byte undo.
+// Settings writer (spec §8). Merge-only edits of a settings file with an ownership record, a backup before every
+// write, atomic replace, validation with auto-restore, and byte-for-byte undo.
+// Targets: a project's .claude/settings.local.json (default), or the user's ~/.claude/settings.json (`ctx global`).
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { projectStateDir, readJson, writeJson } from './paths.js';
+import { claudeDir, ctxHome, projectStateDir, readJson, writeJson } from './paths.js';
 import { localSettingsPath, type Json } from './settings.js';
 
 /** Entries ctx manages. Values mirror the JSON written. */
 export interface Entries {
   deny: string[];
+  /** false = plugin off; true = keep-on override of an off value in a lower-precedence scope. */
   plugins: Record<string, boolean>;
+  /** "name-only" | "user-invocable-only" | "off", or "on" = keep-on override. */
   skills: Record<string, string>;
   mcpjson: string[];
   /** permissions.allow rules, e.g. "Skill(ctx:enable)" so the model can re-enable items without a prompt. */
@@ -30,6 +33,16 @@ export interface Applied {
   lastWrittenHash?: string;
   history: { at: string; action: string; backup: string; summary: string }[];
   verified?: { at: string; beforeTokens: number; afterTokens: number; rawAfterTokens: number };
+  /**
+   * Values ctx replaced (refKey -> previous value); clearing the entry restores them. Only `ctx global` replaces:
+   * Claude Code writes `enabledPlugins: {"x@m": true}` to user settings on install, so switching x off there must
+   * put `true` back on undo.
+   */
+  replaced?: Record<string, unknown>;
+  /** Global target only: keep-on entries written to projects' settings.local.json (project root -> refKeys). */
+  projects?: Record<string, string[]>;
+  /** Global target only: one-line descriptions of the items switched off, for the capability index. */
+  descriptions?: Record<string, string>;
 }
 
 export const emptyEntries = (): Entries => ({ deny: [], plugins: {}, skills: {}, mcpjson: [], allow: [] });
@@ -40,11 +53,25 @@ export function emptyApplied(file: string): Applied {
 
 const KEEP_BACKUPS = 20;
 
-export function appliedPath(root: string): string { return path.join(projectStateDir(root), 'applied.json'); }
-export function backupDir(root: string): string { return path.join(projectStateDir(root), 'backups'); }
+/** A settings file ctx writes, plus the directory holding its ownership record and backups. */
+export interface Target { file: string; stateDir: string; }
+/** A project root (meaning its .claude/settings.local.json) or an explicit target. */
+export type Where = string | Target;
 
-export function loadApplied(root: string): Applied {
-  const a = readJson<Applied>(appliedPath(root)) ?? emptyApplied(localSettingsPath(root));
+export function projectTarget(root: string): Target {
+  return { file: localSettingsPath(root), stateDir: projectStateDir(root) };
+}
+/** User-scope settings; written only by `ctx global` (spec §3.4). */
+export function globalTarget(): Target {
+  return { file: path.join(claudeDir(), 'settings.json'), stateDir: path.join(ctxHome(), 'global') };
+}
+const T = (w: Where): Target => (typeof w === 'string' ? projectTarget(w) : w);
+
+export function appliedPath(w: Where): string { return path.join(T(w).stateDir, 'applied.json'); }
+export function backupDir(w: Where): string { return path.join(T(w).stateDir, 'backups'); }
+
+export function loadApplied(w: Where): Applied {
+  const a = readJson<Applied>(appliedPath(w)) ?? emptyApplied(T(w).file);
   // Records written by older versions lack newer entry kinds.
   a.owned = { ...emptyEntries(), ...a.owned };
   a.preexisting = { ...emptyEntries(), ...a.preexisting };
@@ -109,46 +136,65 @@ function newBackupId(dir: string): string {
 }
 
 /** Save the current settings bytes (or "absent") and the current applied.json. Returns the backup id. */
-export function backup(root: string): string {
-  const dir = backupDir(root);
+export function backup(w: Where): string {
+  const dir = backupDir(w);
   fs.mkdirSync(dir, { recursive: true });
   const id = newBackupId(dir);
-  const file = localSettingsPath(root);
+  const file = T(w).file;
   const exists = fs.existsSync(file);
   if (exists) fs.copyFileSync(file, path.join(dir, `${id}.settings.local.json`));
-  const applied = readJson<Applied>(appliedPath(root));
+  const applied = readJson<Applied>(appliedPath(w));
   fs.writeFileSync(path.join(dir, `${id}.state.json`), JSON.stringify({ settingsExisted: exists, applied: applied ?? null }));
   return id;
 }
 
-export function listBackups(root: string): string[] {
+export function listBackups(w: Where): string[] {
   try {
-    return fs.readdirSync(backupDir(root)).filter((f) => f.endsWith('.state.json')).map((f) => f.slice(0, -'.state.json'.length)).sort();
+    return fs.readdirSync(backupDir(w)).filter((f) => f.endsWith('.state.json')).map((f) => f.slice(0, -'.state.json'.length)).sort();
   } catch {
     return [];
   }
 }
 
-function pruneBackups(root: string, keep: string | undefined): void {
-  const all = listBackups(root).filter((b) => b !== keep);
-  for (const id of all.slice(0, Math.max(0, all.length - KEEP_BACKUPS))) removeBackup(root, id);
+function pruneBackups(w: Where, keep: string | undefined): void {
+  const all = listBackups(w).filter((b) => b !== keep);
+  for (const id of all.slice(0, Math.max(0, all.length - KEEP_BACKUPS))) removeBackup(w, id);
 }
 
-function removeBackup(root: string, id: string): void {
+function removeBackup(w: Where, id: string): void {
   for (const suffix of ['.settings.local.json', '.state.json']) {
-    try { fs.unlinkSync(path.join(backupDir(root), id + suffix)); } catch { /* absent */ }
+    try { fs.unlinkSync(path.join(backupDir(w), id + suffix)); } catch { /* absent */ }
   }
 }
 
 /** Restore one backup byte for byte (settings file and applied.json). */
-function restoreBackup(root: string, id: string, ops: FsOps = realOps): void {
-  const dir = backupDir(root);
+function restoreBackup(w: Where, id: string, ops: FsOps = realOps): void {
+  const dir = backupDir(w);
   const st = JSON.parse(fs.readFileSync(path.join(dir, `${id}.state.json`), 'utf8')) as { settingsExisted: boolean; applied: Applied | null };
-  const file = localSettingsPath(root);
+  const file = T(w).file;
   if (st.settingsExisted) atomicWrite(file, fs.readFileSync(path.join(dir, `${id}.settings.local.json`)), ops);
   else if (fs.existsSync(file)) fs.unlinkSync(file);
-  if (st.applied) writeJson(appliedPath(root), st.applied);
-  else try { fs.unlinkSync(appliedPath(root)); } catch { /* absent */ }
+  if (st.applied) writeJson(appliedPath(w), st.applied);
+  else try { fs.unlinkSync(appliedPath(w)); } catch { /* absent */ }
+}
+
+/** The bytes of the newest backup whose JSON equals `settings` (same keys, order and values), if any. */
+function earlierBytes(w: Where, settings: Json): string | undefined {
+  const want = JSON.stringify(settings);
+  for (const id of listBackups(w).reverse()) {
+    try {
+      const text = fs.readFileSync(path.join(backupDir(w), `${id}.settings.local.json`), 'utf8');
+      if (JSON.stringify(JSON.parse(text)) === want) return text;
+    } catch { /* settings absent in that backup, or unreadable */ }
+  }
+  return undefined;
+}
+
+/** Did the settings file not exist when ctx first wrote it? */
+function originallyAbsent(w: Where, originalBackup: string | undefined): boolean {
+  if (!originalBackup) return false;
+  const st = readJson<{ settingsExisted?: boolean }>(path.join(backupDir(w), `${originalBackup}.state.json`));
+  return st?.settingsExisted === false;
 }
 
 export type Mutation = (settings: Json, applied: Applied) => string[];
@@ -159,8 +205,8 @@ export interface WriteResult { backup: string; changes: string[]; file: string; 
  * Read, back up, mutate, write atomically, validate, record ownership.
  * The mutation edits `settings` in place and `applied` (ownership) and returns change descriptions.
  */
-export function writeSettings(root: string, action: string, mutate: Mutation, ops: FsOps = realOps): WriteResult {
-  const file = localSettingsPath(root);
+export function writeSettings(w: Where, action: string, mutate: Mutation, ops: FsOps = realOps): WriteResult {
+  const file = T(w).file;
   const raw = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined;
   let settings: Json = {};
   if (raw !== undefined && raw.trim()) {
@@ -172,69 +218,78 @@ export function writeSettings(root: string, action: string, mutate: Mutation, op
       throw new Error(`${file} is not valid JSON (${(e as Error).message}); ctx won't overwrite it. Fix it first.`);
     }
   }
-  const applied = loadApplied(root);
-  const id = backup(root);
+  const applied = loadApplied(w);
+  const id = backup(w);
   if (!applied.originalBackup) applied.originalBackup = id;
 
   const changes = mutate(settings, applied);
   if (!changes.length) {
-    removeBackup(root, id);
+    removeBackup(w, id);
     if (applied.originalBackup === id) delete applied.originalBackup;
     return { backup: '', changes, file };
   }
 
-  const text = serialize(settings, detectStyle(raw));
-  try {
-    atomicWrite(file, text, ops);
-    JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (e) {
-    try { restoreBackup(root, id); } catch { /* best effort */ }
-    throw new Error(`write failed, original restored: ${(e as Error).message}`);
+  // Nothing left in a file that didn't exist before ctx: remove it rather than leave "{}" behind.
+  if (!Object.keys(settings).length && originallyAbsent(w, applied.originalBackup)) {
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+    delete applied.lastWrittenHash;
+  } else {
+    // Back to an earlier state (e.g. an override removed again): reuse that state's exact bytes, so formatting the
+    // serializer would change (inline arrays, spacing) comes back byte for byte.
+    const text = earlierBytes(w, settings) ?? serialize(settings, detectStyle(raw));
+    try {
+      atomicWrite(file, text, ops);
+      JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (e) {
+      try { restoreBackup(w, id); } catch { /* best effort */ }
+      throw new Error(`write failed, original restored: ${(e as Error).message}`);
+    }
+    applied.lastWrittenHash = sha(text);
   }
-  applied.lastWrittenHash = sha(text);
   applied.history.push({ at: new Date().toISOString(), action, backup: id, summary: changes.join('; ').slice(0, 500) });
-  writeJson(appliedPath(root), applied);
-  pruneBackups(root, applied.originalBackup);
+  applied.history = applied.history.slice(-200);
+  writeJson(appliedPath(w), applied);
+  pruneBackups(w, applied.originalBackup);
   return { backup: id, changes, file };
 }
 
 export interface UndoResult { restored: string; manualEditsSaved?: string; deleted?: boolean; }
 
 /** True if the settings file differs from what ctx last wrote (user or Claude Code edited it since). */
-export function editedSinceWrite(root: string, applied: Applied): boolean {
-  const file = localSettingsPath(root);
+export function editedSinceWrite(w: Where, applied: Applied): boolean {
+  const file = T(w).file;
   if (!applied.lastWrittenHash) return false;
   if (!fs.existsSync(file)) return true;
   return sha(fs.readFileSync(file, 'utf8')) !== applied.lastWrittenHash;
 }
 
 /** `ctx undo`: restore the most recent backup. `ctx undo all`: restore the original. */
-export function undo(root: string, all = false, ops: FsOps = realOps): UndoResult {
-  const applied = loadApplied(root);
-  const backups = listBackups(root);
+export function undo(w: Where, all = false, ops: FsOps = realOps): UndoResult {
+  const applied = loadApplied(w);
+  const backups = listBackups(w);
   if (!backups.length) throw new Error('nothing to undo: ctx has no backups for this project');
   const target = all ? (applied.originalBackup ?? backups[0]) : backups[backups.length - 1];
   // Keep whatever is there now, in case it holds manual edits made after ctx's last write.
   let manual: string | undefined;
-  if (editedSinceWrite(root, applied)) {
-    const dir = backupDir(root);
+  if (editedSinceWrite(w, applied)) {
+    const dir = backupDir(w);
     manual = `${new Date().toISOString().replace(/[:.]/g, '-')}.pre-undo.settings.local.json`;
-    const file = localSettingsPath(root);
+    const file = T(w).file;
     if (fs.existsSync(file)) fs.copyFileSync(file, path.join(dir, manual));
   }
-  restoreBackup(root, target, ops);
-  const st = JSON.parse(fs.readFileSync(path.join(backupDir(root), `${target}.state.json`), 'utf8')) as { settingsExisted: boolean };
+  restoreBackup(w, target, ops);
+  const st = JSON.parse(fs.readFileSync(path.join(backupDir(w), `${target}.state.json`), 'utf8')) as { settingsExisted: boolean };
   // Drop the restored backup and everything after it from the undo chain (the original is kept for "undo all").
   const original = applied.originalBackup;
-  for (const b of backups.filter((b) => b >= target)) if (b !== original) removeBackup(root, b);
+  for (const b of backups.filter((b) => b >= target)) if (b !== original) removeBackup(w, b);
   // Stamp the restored state so a following undo doesn't see these bytes as manual edits.
-  const after = loadApplied(root);
-  const file = localSettingsPath(root);
+  const after = loadApplied(w);
+  const file = T(w).file;
   after.lastWrittenHash = fs.existsSync(file) ? sha(fs.readFileSync(file, 'utf8')) : undefined;
   after.originalBackup = original;
-  if (all) { after.owned = emptyEntries(); after.preexisting = emptyEntries(); delete after.verified; }
+  if (all) { after.owned = emptyEntries(); after.preexisting = emptyEntries(); delete after.verified; delete after.replaced; }
   after.history = [...applied.history, { at: new Date().toISOString(), action: all ? 'undo all' : 'undo', backup: target, summary: `restored ${target}` }];
-  writeJson(appliedPath(root), after);
+  writeJson(appliedPath(w), after);
   return { restored: target, manualEditsSaved: manual, deleted: !st.settingsExisted };
 }
 
@@ -263,23 +318,39 @@ function cleanupEmpty(s: Json): void {
   if (Array.isArray(s.disabledMcpjsonServers) && !s.disabledMcpjsonServers.length) delete s.disabledMcpjsonServers;
 }
 
+export type SkillLevel = 'name-only' | 'user-invocable-only' | 'off' | 'on';
+
 export type EntryRef =
   | { kind: 'tool'; name: string }
-  | { kind: 'plugin'; id: string }
-  | { kind: 'skill'; name: string; level: 'name-only' | 'user-invocable-only' | 'off' }
+  /** value false (default) = off; true = keep-on override. */
+  | { kind: 'plugin'; id: string; value?: boolean }
+  | { kind: 'skill'; name: string; level: SkillLevel }
   | { kind: 'mcpjson'; name: string }
   | { kind: 'allow'; rule: string };
+
+/** Keep-on overrides (plugin true, skill "on") undo an off value set in a lower-precedence scope. */
+export function isKeepOn(r: EntryRef): boolean {
+  return (r.kind === 'plugin' && r.value === true) || (r.kind === 'skill' && r.level === 'on');
+}
 
 export function describeRef(r: EntryRef): string {
   if (r.kind === 'allow') return `allow ${r.rule}`;
   if (r.kind === 'tool') return `deny ${r.name}`;
-  if (r.kind === 'plugin') return `plugin ${r.id} off`;
-  if (r.kind === 'skill') return `skill ${r.name} ${r.level}`;
+  if (r.kind === 'plugin') return r.value ? `plugin ${r.id} on (override)` : `plugin ${r.id} off`;
+  if (r.kind === 'skill') return r.level === 'on' ? `skill ${r.name} on (override)` : `skill ${r.name} ${r.level}`;
   return `.mcp.json server ${r.name} off`;
 }
 
-/** Set one trim entry. Owned if ctx adds it; preexisting if already there; skipped if the user set a different value. */
-export function setEntry(s: Json, a: Applied, r: EntryRef): string | undefined {
+export interface SetOptions {
+  /**
+   * Replace a value the user set (recording it in `replaced` so clearing restores it) instead of skipping.
+   * Used only by `ctx global` for `enabledPlugins: true` entries that Claude Code writes on install.
+   */
+  replace?: (current: unknown) => boolean;
+}
+
+/** Set one entry. Owned if ctx adds it; preexisting if already there; skipped if the user set a different value. */
+export function setEntry(s: Json, a: Applied, r: EntryRef, opts: SetOptions = {}): string | undefined {
   if (r.kind === 'allow') {
     const allow = permList(s, 'allow', true)!;
     if (allow.includes(r.rule)) {
@@ -301,23 +372,34 @@ export function setEntry(s: Json, a: Applied, r: EntryRef): string | undefined {
     return describeRef(r);
   }
   if (r.kind === 'plugin') {
+    const v = r.value ?? false;
     const ep = objKey(s, 'enabledPlugins', true)!;
-    if (ep[r.id] === false) {
-      if (!(r.id in a.owned.plugins)) a.preexisting.plugins[r.id] = false;
+    if (ep[r.id] === v) {
+      if (!(r.id in a.owned.plugins)) a.preexisting.plugins[r.id] = v;
+      else a.owned.plugins[r.id] = v;
       return undefined;
     }
-    if (r.id in ep && !(r.id in a.owned.plugins)) return `skipped plugin ${r.id}: set to ${String(ep[r.id])} by you`;
-    ep[r.id] = false;
-    a.owned.plugins[r.id] = false;
+    if (r.id in ep && !(r.id in a.owned.plugins)) {
+      if (!opts.replace?.(ep[r.id])) { cleanupEmpty(s); return `skipped plugin ${r.id}: set to ${String(ep[r.id])} by you`; }
+      (a.replaced ??= {})[refKey(r)] = ep[r.id];
+      delete a.preexisting.plugins[r.id];
+    }
+    ep[r.id] = v;
+    a.owned.plugins[r.id] = v;
     return describeRef(r);
   }
   if (r.kind === 'skill') {
     const so = objKey(s, 'skillOverrides', true)!;
     if (so[r.name] === r.level) {
       if (!(r.name in a.owned.skills)) a.preexisting.skills[r.name] = r.level;
+      else a.owned.skills[r.name] = r.level;
       return undefined;
     }
-    if (r.name in so && !(r.name in a.owned.skills)) return `skipped skill ${r.name}: set to "${String(so[r.name])}" by you`;
+    if (r.name in so && !(r.name in a.owned.skills)) {
+      if (!opts.replace?.(so[r.name])) { cleanupEmpty(s); return `skipped skill ${r.name}: set to "${String(so[r.name])}" by you`; }
+      (a.replaced ??= {})[refKey(r)] = so[r.name];
+      delete a.preexisting.skills[r.name];
+    }
     so[r.name] = r.level;
     a.owned.skills[r.name] = r.level;
     return describeRef(r);
@@ -335,9 +417,16 @@ export function setEntry(s: Json, a: Applied, r: EntryRef): string | undefined {
 
 export type ClearResult = 'removed' | 'not-owned' | 'absent';
 
-/** Remove one trim entry. Only entries ctx owns are removed unless `force` (then any entry in this local file). */
+/**
+ * Remove one entry. Only entries ctx owns are removed unless `force` (then any entry in this file).
+ * Plugin refs match by value (false unless `value: true`); skill refs match any trim level, or "on" for keep-on refs.
+ * A value ctx replaced is restored instead of deleted.
+ */
 export function clearEntry(s: Json, a: Applied, r: EntryRef, force = false): ClearResult {
   const drop = <T>(arr: T[], v: T) => { const i = arr.indexOf(v); if (i >= 0) arr.splice(i, 1); };
+  const restore = (obj: Json, key: string, rk: string) => {
+    if (a.replaced && rk in a.replaced) { obj[key] = a.replaced[rk]; delete a.replaced[rk]; } else delete obj[key];
+  };
   let result: ClearResult = 'absent';
   if (r.kind === 'allow') {
     const allow = permList(s, 'allow', false);
@@ -353,15 +442,19 @@ export function clearEntry(s: Json, a: Applied, r: EntryRef, force = false): Cle
     }
   } else if (r.kind === 'plugin') {
     const ep = objKey(s, 'enabledPlugins', false);
-    if (ep && ep[r.id] === false) {
-      if (r.id in a.owned.plugins || force) { delete ep[r.id]; delete a.owned.plugins[r.id]; delete a.preexisting.plugins[r.id]; result = 'removed'; }
-      else result = 'not-owned';
+    const v = r.value ?? false;
+    if (ep && ep[r.id] === v) {
+      if (a.owned.plugins[r.id] === v || force) {
+        restore(ep, r.id, refKey(r)); delete a.owned.plugins[r.id]; delete a.preexisting.plugins[r.id]; result = 'removed';
+      } else result = 'not-owned';
     }
   } else if (r.kind === 'skill') {
     const so = objKey(s, 'skillOverrides', false);
-    if (so && r.name in so && so[r.name] !== 'on') {
-      if (r.name in a.owned.skills || force) { delete so[r.name]; delete a.owned.skills[r.name]; delete a.preexisting.skills[r.name]; result = 'removed'; }
-      else result = 'not-owned';
+    const match = (v: unknown) => (r.level === 'on' ? v === 'on' : v !== undefined && v !== 'on');
+    if (so && r.name in so && match(so[r.name])) {
+      if ((r.name in a.owned.skills && match(a.owned.skills[r.name])) || force) {
+        restore(so, r.name, refKey(r)); delete a.owned.skills[r.name]; delete a.preexisting.skills[r.name]; result = 'removed';
+      } else result = 'not-owned';
     }
   } else {
     const list = Array.isArray(s.disabledMcpjsonServers) ? s.disabledMcpjsonServers as unknown[] : undefined;
@@ -378,7 +471,7 @@ export function clearEntry(s: Json, a: Applied, r: EntryRef, force = false): Cle
 export function ownedRefs(a: Applied): EntryRef[] {
   return [
     ...a.owned.deny.map((name) => ({ kind: 'tool', name }) as EntryRef),
-    ...Object.keys(a.owned.plugins).map((id) => ({ kind: 'plugin', id }) as EntryRef),
+    ...Object.entries(a.owned.plugins).map(([id, value]) => ({ kind: 'plugin', id, ...(value ? { value } : {}) }) as EntryRef),
     ...Object.entries(a.owned.skills).map(([name, level]) => ({ kind: 'skill', name, level }) as EntryRef),
     ...a.owned.mcpjson.map((name) => ({ kind: 'mcpjson', name }) as EntryRef),
     ...a.owned.allow.map((rule) => ({ kind: 'allow', rule }) as EntryRef),
@@ -387,7 +480,24 @@ export function ownedRefs(a: Applied): EntryRef[] {
 
 export function refKey(r: EntryRef): string {
   if (r.kind === 'allow') return `allow:${r.rule}`;
-  return r.kind === 'plugin' ? `plugin:${r.id}` : r.kind === 'mcpjson' ? `mcpjson:${r.name}` : `${r.kind}:${r.name}`;
+  if (r.kind === 'plugin') return r.value ? `plugin-on:${r.id}` : `plugin:${r.id}`;
+  if (r.kind === 'skill') return r.level === 'on' ? `skill-on:${r.name}` : `skill:${r.name}`;
+  return r.kind === 'mcpjson' ? `mcpjson:${r.name}` : `${r.kind}:${r.name}`;
+}
+
+/** Parse a refKey back into a ref (skill trim keys come back at name-only; clearEntry matches any trim level). */
+export function refFromKey(k: string): EntryRef | undefined {
+  const i = k.indexOf(':');
+  const kind = k.slice(0, i);
+  const name = k.slice(i + 1);
+  if (kind === 'tool') return { kind: 'tool', name };
+  if (kind === 'plugin') return { kind: 'plugin', id: name };
+  if (kind === 'plugin-on') return { kind: 'plugin', id: name, value: true };
+  if (kind === 'skill') return { kind: 'skill', name, level: 'name-only' };
+  if (kind === 'skill-on') return { kind: 'skill', name, level: 'on' };
+  if (kind === 'mcpjson') return { kind: 'mcpjson', name };
+  if (kind === 'allow') return { kind: 'allow', rule: name };
+  return undefined;
 }
 
 /** Allow rule that lets the model invoke /ctx:enable without a permission prompt. */
@@ -399,7 +509,7 @@ export function driftedEntries(settings: Json, a: Applied): string[] {
   const deny = (isObj(settings.permissions) && Array.isArray(settings.permissions.deny)) ? settings.permissions.deny : [];
   for (const t of a.owned.deny) if (!deny.includes(t)) out.push(`tool:${t}`);
   const ep = isObj(settings.enabledPlugins) ? settings.enabledPlugins : {};
-  for (const p of Object.keys(a.owned.plugins)) if (ep[p] !== false) out.push(`plugin:${p}`);
+  for (const [p, v] of Object.entries(a.owned.plugins)) if (ep[p] !== v) out.push(`plugin:${p}`);
   const so = isObj(settings.skillOverrides) ? settings.skillOverrides : {};
   for (const [k, v] of Object.entries(a.owned.skills)) if (so[k] !== v) out.push(`skill:${k}`);
   return out;

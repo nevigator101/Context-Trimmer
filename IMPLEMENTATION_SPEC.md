@@ -149,8 +149,12 @@ The `SessionStart` hook runs `ctx hook session-start`. It must be fast and use o
 Project-specific extras (e.g. the Cloudflare plugin, used only in one other project) should not load everywhere.
 
 - **Project scope first.** Every v1 change goes in that project's `.claude/settings.local.json`, so projects never affect each other.
-- **Optional user-level lean baseline: `/ctx:global`.** It proposes switching rarely used plugins and skills off in `~/.claude/settings.json` and switching them back on in the projects that use them, using per-project usage from transcripts. Example: Cloudflare is off globally and on in the Cloudflare project. This depends on project-level `true` overriding user-level `false` **[verify in M0]**; if that doesn't work, keep v1 project-scoped only.
-- `ctx` keeps a registry of projects it has profiled (`~/.claude/ctx/registry.json`), so `/ctx:global` can show which project uses which extra.
+- **Optional user-level lean baseline: `/ctx:global`.** It proposes switching rarely used plugins off and skills to name-only in `~/.claude/settings.json`, and switching them back on in the projects that use them, using per-project usage from transcripts. Example: Cloudflare is off globally and on in the Cloudflare project. **[verified M0 + M4]** A project-local `enabledPlugins: true` overrides user `false`, and a local `skillOverrides: "on"` overrides a user-level level, per key (VERIFY.md items 8, 26, 27).
+  - **Classification (M4):** across projects with a session in the last 90 days (10 sessions each), an item used by more than half of them stays on ("common"); one used by fewer goes off with a local keep-on override in each using project ("extra"); one used nowhere goes off ("unused") unless the global counters show recent use ctx can't map to a project ("elsewhere"). Plugins under 200 tokens and skills under 50 are left alone. ctx itself and values the user set in user settings are never touched.
+  - **Built-in tools are not trimmed globally:** a user-level deny can't be overridden per project.
+  - **Writes, in order:** keep-on overrides in the projects first (harmless on their own), then user settings. An item whose override can't be written (e.g. invalid JSON in that project) stays on globally. Claude Code writes `enabledPlugins: {"x": true}` to user settings on install, so the global writer may replace `true` with `false`; it records the old value and undo restores it. `/ctx:global undo` removes exactly what ctx global wrote.
+  - **Coming back:** in a project where a global-off plugin is needed later, `ctx on` (and `/ctx:enable`, and learned triggers) writes a local keep-on override; the user file is untouched. The SessionStart capability index lists global-off plugins that the project doesn't override.
+- `ctx` keeps a registry of projects it has profiled (`~/.claude/ctx/registry.json`). `/ctx:global` also discovers every project with transcripts: the folder name is lossy, so the root comes from the transcripts' `cwd`, checked against the folder's slug. Projects whose folder no longer exists are ignored.
 
 ### 3.5 Bringing things back
 
@@ -170,13 +174,19 @@ plugin: ctx/
     on/SKILL.md         user-invoked   /ctx:on       re-enable an item
     off/SKILL.md        user-invoked   /ctx:off      disable an item
     undo/SKILL.md       user-invoked   /ctx:undo     restore the previous backup; "/ctx:undo all" restores the original
-    global/SKILL.md     user-invoked   /ctx:global   cross-project baseline (§3.4), later milestone
+    global/SKILL.md     user-invoked   /ctx:global   cross-project baseline (§3.4)
+    auto/SKILL.md       user-invoked   /ctx:auto     learned triggers on/off (§9.3)
     enable/SKILL.md     MODEL-invoked  /ctx:enable   lets Claude re-enable a disabled item (§9.2)
-  hooks/hooks.json      SessionStart (fast, cached only); SessionEnd (optional: refresh the usage ledger in the background)
+  hooks/hooks.json      SessionStart (fast, cached only); UserPromptSubmit (learned triggers, opt-in; silent
+                        otherwise); SessionEnd (refresh the usage ledger and triggers in the background)
   dist/ctx.mjs          single bundled CLI, no runtime dependencies
 
 state: ~/.claude/ctx/
   registry.json                     profiled projects
+  config.json                       {auto, threshold} for learned triggers
+  triggers.json                     learned trigger table (all projects)
+  global/                           plan.json, applied.json (owned user-settings entries, replaced values,
+                                    keep-on overrides per project), backups/
   measurements/<cc-version>.json    per-item costs, keyed by item id and model
   projects/<project-hash>/
     project-profile.json            description, services, work types (§5.4)
@@ -364,6 +374,8 @@ MCP tools are deferred by default, so their upfront cost is only tool names and 
 
 If a deny or override the user wants reversed lives in another settings file (user, project or managed), don't edit that file in v1. Report its path and the exact key so the user can change it.
 
+**M4 exceptions:** `/ctx:global` writes user settings, but only the entries it owns (ownership record and backups in `~/.claude/ctx/global/`). For a plugin or skill switched off in user or shared project settings, `ctx on` writes a project-local keep-on override (`enabledPlugins: true` / `skillOverrides: "on"`) instead of editing the other file. Tool denies and managed settings still can't be overridden; for those, ctx reports the path and key.
+
 ---
 
 ## 9. Bringing items back
@@ -395,6 +407,12 @@ Build the descriptions from the first sentence of each item's own description, t
 ### 9.3 Later milestone: learned triggers (`UserPromptSubmit`)
 
 From the ledger, learn keywords in user prompts that preceded the use of each item (e.g. "wrangler", "deploy to workers" → `plugin:cloudflare@cloudflare`). Before Claude sees a prompt, the hook scores it locally (no model call). Above a threshold, it re-enables the item and adds a one-line note. It's off by default and switched on with `/ctx:auto on`.
+
+**Built in M4 [verified, VERIFY.md item 28]:**
+
+- **Learning** (`ctx triggers learn`; also run by `/ctx:auto on` and in the background at SessionEnd, at most every 6 hours): the newest 30 sessions of every project. For each typed prompt (tool results, meta lines and injected context are skipped; for slash commands only the arguments count), the items used before the next prompt are recorded. Plugins count through their skills, agents and MCP servers. Keywords per item come from two sources. **Name keywords** (weight 1) are the item's name and, for plugins, their skill folder names; only names of 4 characters or more that aren't generic words such as "loop" or "init". **Learned keywords** are words that preceded the item in at least 2 prompts with precision ≥ 0.5 (the share of all prompts containing the word that led to the item), weighted by precision × min(1, hits/3). Stored in `~/.claude/ctx/triggers.json`.
+- **Scoring:** best matching keyword weight plus a quarter of each further match, capped at 1; threshold 0.75 (`--threshold`). Candidates are only items ctx switched off in this project: owned local trims (tool denies, plugins off, skills `off`) and global-off plugins without a local override. At most 2 items per prompt.
+- **Hook:** `UserPromptSubmit` → `ctx hook prompt-submit`. With auto off it reads one config file and exits silently. On a match it runs `ctx on <item> --reason "auto: prompt mentions …"` and returns `additionalContext` (why, plus what `ctx on` printed: the tool schema, or the `/reload-plugins` hint) and a one-line `systemMessage` for the user.
 
 ---
 
@@ -430,8 +448,11 @@ Subcommands the CLI must support:
 | `on <id\|name>`, `off <id\|name>` | Switch one item | |
 | `undo [all]` | Restore a backup | |
 | `report` | Print the breakdown | `--json` |
-| `hook session-start`, `hook session-end` | Hook entry points | |
-| `global` | Cross-project baseline (later milestone) | |
+| `hook session-start`, `hook session-end`, `hook prompt-submit` | Hook entry points | |
+| `global [plan\|apply\|undo]` | Cross-project baseline (M4) | `--days N`, `--sessions N`, `--share X`, `--min-tokens N`, `--json`; apply: `--items`, `--yes` |
+| `projects` | Projects known from the registry and transcripts (M4) | |
+| `auto on\|off\|status` | Learned triggers on or off (M4) | `--threshold X` |
+| `triggers [learn\|test "<prompt>"]` | Show, re-learn or try the trigger table (M4) | `--json` |
 | `doctor` | Diagnose setup | |
 
 Accept fuzzy names in `on`/`off` (`artifact`, `Artifact`, `tool:Artifact`). If a name matches more than one item, list the candidates and exit.
