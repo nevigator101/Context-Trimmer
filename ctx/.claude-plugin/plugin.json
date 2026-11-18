@@ -1,0 +1,5 @@
+{
+  "name": "ctx",
+  "version": "0.1.0",
+  "description": "Measure what each Claude Code session loads, trim what this project does not use, and bring it back when needed."
+}

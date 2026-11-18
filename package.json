@@ -1,0 +1,22 @@
+{
+  "name": "ctx-plugin-dev",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Build workspace for the ctx Claude Code plugin (shipped files live in ./ctx)",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "validate": "node build.mjs && node scripts/validate.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
