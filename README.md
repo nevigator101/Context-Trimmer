@@ -1,4 +1,4 @@
-# ctx: development workspace
+# Context-Trimmer (ctx): development workspace
 
 This repository is a Claude Code plugin marketplace with one plugin, **ctx**, in [`ctx/`](ctx/). For what it does and how to install it, see [`ctx/README.md`](ctx/README.md).
 

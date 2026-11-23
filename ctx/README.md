@@ -11,13 +11,13 @@ It then writes a lean profile to the project's `.claude/settings.local.json`, us
 In Claude Code:
 
 ```
-/plugin marketplace add <owner>/<repo>
+/plugin marketplace add nevigator101/Context-Trimmer
 /plugin install ctx@ctx
 ```
 
 Then open a project and run `/ctx:setup`. Nothing changes in any project until you confirm a plan there.
 
-ctx needs Node.js 20 or later on PATH. Without Node, download the standalone build for your platform from the repository's releases (`ctx-windows-x64.exe`, `ctx-darwin-arm64`, `ctx-linux-x64`, ...). Put it in `~/.claude/ctx/bin/` (on macOS and Linux, `chmod +x` it). The plugin's launcher uses Node when it finds it, and the standalone build otherwise. If it finds neither, it prints one line at session start and stays out of the way.
+ctx needs Node.js 20 or later on PATH. Without Node, download the standalone build for your platform from the [releases page](https://github.com/nevigator101/Context-Trimmer/releases) (`ctx-windows-x64.exe`, `ctx-darwin-arm64`, `ctx-linux-x64`, ...). Put it in `~/.claude/ctx/bin/` (on macOS and Linux, `chmod +x` it). The plugin's launcher uses Node when it finds it, and the standalone build otherwise. If it finds neither, it prints one line at session start and stays out of the way.
 
 ## What it looks like
 
