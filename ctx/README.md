@@ -4,7 +4,7 @@ ctx measures what every new Claude Code session loads up front in a project: bui
 
 It then writes a lean profile to the project's `.claude/settings.local.json`, using only entries it can undo: tool denies, plugins off, and skills set to name-only. Items used in the project's recent sessions are never switched off unless you confirm.
 
-**Status: 0.1.0.** Tested on Windows and Linux. CI covers macOS.
+**Status: 0.1.0.** Clean install tested on Windows, macOS and Linux.
 
 ## Install
 

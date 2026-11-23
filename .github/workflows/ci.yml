@@ -21,8 +21,8 @@ jobs:
       # Shared runners are slower than a developer machine; S5 (300 ms) is checked locally.
       CTX_LATENCY_BUDGET_MS: '1500'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm

@@ -546,7 +546,7 @@ Run the ctx onboarding for this project, in order:
 | **M2 · Plan + apply + undo** | Planner, dependency map, protected list, settings writer, `/ctx:setup`, `/ctx:trim`, `/ctx:on`, `/ctx:off`, `/ctx:undo` | S1, S2 and S3 on the reference project; undo restores files byte for byte |
 | **M3 · Session start + re-enable** | SessionStart hook, capability index, `/ctx:enable`, re-enable feedback into the planner | S4 and S5; a re-enabled item is not trimmed again |
 | **M4 · Cross-project + triggers** | `/ctx:global`, project registry, learned `UserPromptSubmit` triggers (opt-in) | Switching between two profiled projects loads each one's extras only in that project |
-| **M5 · Distribution** | Marketplace listing, standalone binaries, README with screenshots of the terminal output | Clean install on a fresh machine for each OS. **Met on Windows and Linux** (`test/e2e/fresh-install.mjs`, VERIFY.md item 36); macOS runs in CI |
+| **M5 · Distribution** | Marketplace listing, standalone binaries, README with screenshots of the terminal output | Clean install on a fresh machine for each OS. **Met on Windows, Linux and macOS** (`test/e2e/fresh-install.mjs`, VERIFY.md items 36 and 39) |
 
 ---
 

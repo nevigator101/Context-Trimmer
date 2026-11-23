@@ -63,6 +63,7 @@ server that saves the request body and answers HTTP 400, so no model call is mad
 | 36 | M5 acceptance: clean install (`test/e2e/fresh-install.mjs`) | **Windows (2.1.326) and Linux in Docker (2.1.327, `node:22-bookworm`): all 16 checks pass.** `plugin marketplace add <repo>` and `plugin install ctx@ctx` in a fresh config. Hooks run. Only `ctx:enable` is listed for the model. `/ctx:doctor` runs without a prompt. Without Node: one SessionStart hint, exit 0 everywhere, and a clear message from skills. With the standalone build: `/ctx:doctor` and a full `/ctx:report` measurement work. After `plugin uninstall`, no ctx hooks run. macOS runs in CI (`.github/workflows/ci.yml`); not run here. | Met on Windows and Linux. |
 | 37 | Stream events for hooks | `-p --output-format stream-json` reports SessionStart hook runs (`hook_response`). UserPromptSubmit runs that print nothing aren't reported; output from one appears as `UserPromptSubmit says: …`. | Tests check silence by the absence of such events. |
 | 38 | Re-run on Claude Code 2.1.330 (2026-11-23) | `fresh-install`, `apply-cycle`, `global-switch`, `enable-loop` and `auto-trigger` all pass unchanged on Windows. | No changes needed. |
+| 39 | macOS clean install (CI, `macos-latest` arm64, Claude Code 2.1.330, 2026-11-23) | All 16 `fresh-install.mjs` checks pass, including the standalone build and a full `/ctx:report` measurement. | M5 acceptance met on all three OSes. |
 
 ## Changes to the design (applied in code)
 
